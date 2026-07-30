@@ -24,7 +24,7 @@ import {
   copyToClipboard
 } from '../helpers'
 import {isMintTrusted, addTrustedMint} from '../trustedMints'
-import {payRequestImage} from '../noteImages'
+import {payRequestImage, declaredArtwork} from '../noteImages'
 import Qr from '../components/Qr'
 import RequireWallet from '../components/RequireWallet'
 
@@ -269,15 +269,17 @@ const Mint: Component = () => {
           NotifyKind.ERROR
         )
       }
+      // declared, hash-verified artwork (NORD-02) beats the payRequest
+      // metadata image - the former is the asset's committed art, the
+      // latter is the mint's generic branding
+      const artwork = await declaredArtwork(noteInfo)
       await addBearer({
         url,
         callback: noteInfo.callback,
         amount: noteInfo.maxWithdrawable,
         verified: true,
         mintPubkey,
-        // a mint that brands its payRequest metadata with an image entry
-        // brands its freshly minted notes with it too - display only
-        image: payRequestImage(info.metadata) ?? undefined
+        image: artwork ?? payRequestImage(info.metadata) ?? undefined
       })
       notify(
         `Minted a bearer note of ${msatToSats(noteInfo.maxWithdrawable)} sats.`,

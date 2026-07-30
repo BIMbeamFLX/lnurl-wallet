@@ -264,6 +264,12 @@ export type WithdrawRequestInfo = {
   maxWithdrawable: number
   defaultDescription?: string
   mintPubkey?: string
+  // NORD-02 (optional): [genesis event id, relay hint] on asset notes
+  asset?: [string, string]
+  // NORD-02 (optional): [blob url, sha256] - the genesis artwork
+  // commitment mirrored so a wallet without a nostr client can render
+  // the card in one round trip (see noteImages.ts declaredArtwork)
+  artwork?: [string, string]
 }
 
 // the informational GET (LUD-03 step 1) - never burns, rotates or alters

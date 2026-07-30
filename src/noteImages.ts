@@ -1,3 +1,6 @@
+import {sha256} from '@noble/hashes/sha2.js'
+import {bytesToHex} from '@noble/hashes/utils.js'
+
 // Note images - a display-layer nicety, deliberately outside the protocol.
 // An image is never part of the note URL, never sent anywhere, and does not
 // travel with a handover; it lives only inside this wallet's encrypted
@@ -41,6 +44,63 @@ export const payRequestImage = (metadata: string): string | null => {
   } catch {
     return null
   }
+}
+
+// ---- mint-declared artwork (NORD-02) ----
+
+// a SERVICE may declare a note's artwork as [url, sha256] in its
+// withdrawRequest. The hash is the authority and the URL only transport:
+// bytes fetched from anywhere - the mint, a Blossom mirror, a .fips
+// host - verify locally against the declared hash before they render.
+const ARTWORK_MAX_BYTES = 1_048_576 // a card face, not a photo album
+
+const bytesToBase64 = (bytes: Uint8Array): string => {
+  let binary = ''
+  // chunked: String.fromCharCode(...whole) overflows the call stack
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  }
+  return btoa(binary)
+}
+
+// fetch + verify + encode as a data URL. Null on any failure, mismatch
+// or oversize - a note without artwork is a note, never an error.
+export const fetchDeclaredArtwork = async (
+  url: string,
+  sha256Hex: string
+): Promise<string | null> => {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const bytes = new Uint8Array(await res.arrayBuffer())
+    if (!bytes.length || bytes.length > ARTWORK_MAX_BYTES) return null
+    if (bytesToHex(sha256(bytes)) !== sha256Hex.trim().toLowerCase()) {
+      return null
+    }
+    // content-type is cosmetic (browsers sniff image bytes in <img>);
+    // the hash check above is the real gate
+    const declared = res.headers.get('content-type')?.split(';')[0] ?? ''
+    const mime = declared.startsWith('image/') ? declared : 'image/png'
+    return `data:${mime};base64,${bytesToBase64(bytes)}`
+  } catch {
+    return null
+  }
+}
+
+// the withdrawRequest's optional artwork field, shape-checked - see
+// WithdrawRequestInfo in lnurlcash.ts
+export const declaredArtwork = (info: {
+  artwork?: unknown
+}): Promise<string | null> => {
+  const pair = info.artwork
+  if (
+    !Array.isArray(pair) ||
+    typeof pair[0] !== 'string' ||
+    typeof pair[1] !== 'string'
+  ) {
+    return Promise.resolve(null)
+  }
+  return fetchDeclaredArtwork(pair[0], pair[1])
 }
 
 // attached files are downscaled to render size and re-encoded - notes are

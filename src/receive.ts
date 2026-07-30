@@ -9,6 +9,7 @@ import {
 } from './lnurlcash'
 import type {Bearer} from './storage'
 import type {NewBearer} from './WalletContext'
+import {declaredArtwork} from './noteImages'
 
 // shared by Scan and Paste: resolve whatever came in to a note URL, ask the
 // issuing service what it is worth (an informational GET - per spec this
@@ -38,7 +39,10 @@ export const receiveNote = async (
       callback: info.callback,
       amount: info.maxWithdrawable,
       verified: true,
-      mintPubkey: info.mintPubkey
+      mintPubkey: info.mintPubkey,
+      // artwork the service declares is fetched and hash-verified; null
+      // (none declared, mismatch, art host offline) just means no image
+      image: (await declaredArtwork(info)) ?? undefined
     }
   } catch {
     // service unreachable - fall back to the sender's own (unverified)

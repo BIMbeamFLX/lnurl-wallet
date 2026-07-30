@@ -38,7 +38,7 @@ import {
   NotifyKind
 } from '../helpers'
 import {getTrustedMintPubkey} from '../trustedMints'
-import {fileToNoteImage} from '../noteImages'
+import {fileToNoteImage, declaredArtwork} from '../noteImages'
 import Qr from './Qr'
 
 type Action = 'melt' | 'split' | 'transfer' | null
@@ -106,12 +106,16 @@ const BearerCard: Component<BearerCardProps> = props => {
           NotifyKind.ERROR
         )
       }
+      // adopt artwork the service declares (hash-verified); keep a
+      // manually attached image when it declares none
+      const artwork = await declaredArtwork(info)
       await updateBearer(props.bearer.id, {
         url,
         callback: info.callback,
         amount: info.maxWithdrawable,
         verified: true,
-        mintPubkey: info.mintPubkey ?? props.bearer.mintPubkey
+        mintPubkey: info.mintPubkey ?? props.bearer.mintPubkey,
+        ...(artwork ? {image: artwork} : {})
       })
       notify('Note refreshed.', NotifyKind.SUCCESS)
     } catch (err) {
