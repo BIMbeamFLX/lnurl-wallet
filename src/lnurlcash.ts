@@ -2,7 +2,8 @@ import {bytesToHex} from '@noble/hashes/utils.js'
 import {offlineMode} from './offlineMode'
 import {nextCashSecret, requireRecoverableCashSecret} from './cashSecrets'
 import {msatToSats} from './helpers'
-import {configureNetworkGuard} from './lib/net'
+import {configureNetworkGuard, configureTransport} from './lib/net'
+import {fetchServiceResponse} from './serviceTransport'
 import {configureSecretProvider} from './lib/secrets'
 import type {MintFee} from './lib'
 
@@ -82,6 +83,10 @@ export const generateNoteSecret = (domain: string): string =>
   bytesToHex(crypto.getRandomValues(new Uint8Array(32)))
 
 configureSecretProvider(generateNoteSecret)
+
+// a napplet reaches the SERVICE through its shell (see serviceTransport.ts);
+// the standalone webwallet keeps plain fetch
+configureTransport(fetchServiceResponse)
 
 // New mint invoices and cross-mint transfers must survive a reload after
 // payment. Unlike an ordinary mutation output, they cannot safely use the
