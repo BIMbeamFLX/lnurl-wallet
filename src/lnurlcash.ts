@@ -3,7 +3,7 @@ import {offlineMode} from './offlineMode'
 import {nextCashSecret, requireRecoverableCashSecret} from './cashSecrets'
 import {msatToSats} from './helpers'
 import {configureNetworkGuard, configureTransport} from './lib/net'
-import {fetchServiceResponse} from './serviceTransport'
+import {fetchServiceResponse, isServiceOffline} from './serviceTransport'
 import {configureSecretProvider} from './lib/secrets'
 import type {MintFee} from './lib'
 
@@ -52,7 +52,7 @@ export * from './lib'
 // src/lib's functions make - see offlineMode.ts's own comment on why this
 // needs to be the one choke point every request goes through
 configureNetworkGuard(() => {
-  if (offlineMode()) {
+  if (offlineMode() || isServiceOffline()) {
     throw new Error(
       'Offline mode is on - turn it off in the nav to reach a service.'
     )
