@@ -24,12 +24,14 @@ import {
   IoClipboardSharp,
   IoReturnDownForwardSharp,
   IoEllipsisVerticalSharp,
-  IoSwapVerticalSharp
+  IoSwapVerticalSharp,
+  IoPricetagsSharp
 } from 'solid-icons/io'
 import {MdSharpKeyboard} from 'solid-icons/md'
 
 import {useWallet, groupByServer} from '../WalletContext'
 import type {Bearer} from '../storage'
+import {splitBearerIntoAmounts, type SplitTarget} from '../noteSplitting'
 import {
   serverOf,
   toBech32Lnurl,
@@ -70,6 +72,7 @@ import {
   setNoteGroupByMint
 } from '../notePrefs'
 import {notify, NotifyKind, msatToSats, pasteFromClipboard} from '../helpers'
+import {decodeTag, parseLabelTags} from '../noteTags'
 import {takeMeltInvoice} from '../meltHandoff'
 import {receiveIntoWallet} from '../receive'
 import BearerCard from '../components/BearerCard'
@@ -100,6 +103,10 @@ const Wallet: Component = () => {
   // separate per-mint sections
   const [showSpent, setShowSpent] = createSignal(false)
   const [searchQuery, setSearchQuery] = createSignal('')
+  // tag ids (see noteTags.ts) currently filtering the list - a note matches
+  // once it carries any one of these, not all of them; empty means no tag
+  // filter is active at all, same "off" meaning as an empty searchQuery
+  const [selectedTags, setSelectedTags] = createSignal<Set<string>>(new Set())
   // the search field starts collapsed to a plain button, like the other
   // list-controls toggles - opening it mounts the actual input (see the
   // ref below, which focuses it the moment it appears)
@@ -151,6 +158,11 @@ const Wallet: Component = () => {
   // collapse-behind-one-button treatment as that one and Sort above
   const [showListMoreMenu, setShowListMoreMenu] = createSignal(false)
   let listMoreMenuRef: HTMLDivElement | null = null
+  // same collapse-behind-one-button treatment as Sort/More above - a panel
+  // listing every tag currently in use (see noteTags.ts), toggled on/off
+  // the active filter set rather than picking just one
+  const [showTagMenu, setShowTagMenu] = createSignal(false)
+  let tagMenuRef: HTMLDivElement | null = null
   onMount(() => {
     const onDocClick = (e: MouseEvent) => {
       const target = e.target as Node
@@ -162,6 +174,9 @@ const Wallet: Component = () => {
       }
       if (listMoreMenuRef && !listMoreMenuRef.contains(target)) {
         setShowListMoreMenu(false)
+      }
+      if (tagMenuRef && !tagMenuRef.contains(target)) {
+        setShowTagMenu(false)
       }
     }
     document.addEventListener('mousedown', onDocClick)
@@ -313,18 +328,49 @@ const Wallet: Component = () => {
     showSpent() ? bearers() : bearers().filter(b => !b.spent)
   )
 
+  // every distinct tag currently in use among the notes being shown (see
+  // noteTags.ts) - a tag only found on a hidden spent note doesn't appear
+  // here either, same visibility rule Show spent already applies to the
+  // list itself
+  const availableTags = createMemo(() => {
+    const tags = new Set<string>()
+    for (const b of visibleBearers()) {
+      for (const tag of parseLabelTags(b.label || '').tags) tags.add(tag)
+    }
+    return [...tags].sort((a, b) => decodeTag(a).localeCompare(decodeTag(b)))
+  })
+
+  const toggleTag = (tag: string) => {
+    setSelectedTags(prev => {
+      const next = new Set(prev)
+      if (next.has(tag)) next.delete(tag)
+      else next.add(tag)
+      return next
+    })
+  }
+
   // matches either the issuing mint's hostname or the note's sat amount -
   // msatToSats formats with locale thousands separators (e.g. "1,000"),
   // which would never match a plain typed "1000", so amount matching goes
-  // straight off the raw sats value instead
+  // straight off the raw sats value instead. A tag filter (if any tags are
+  // selected) is ANDed on top: a note need only carry one of them, not all
   const filteredBearers = createMemo(() => {
     const q = searchQuery().trim().toLowerCase()
-    if (!q) return visibleBearers()
-    return visibleBearers().filter(
-      b =>
-        serverOf(b.url).toLowerCase().includes(q) ||
-        String(Math.floor(b.amount / 1000)).includes(q)
-    )
+    const tags = selectedTags()
+    return visibleBearers().filter(b => {
+      if (
+        q &&
+        !serverOf(b.url).toLowerCase().includes(q) &&
+        !String(Math.floor(b.amount / 1000)).includes(q)
+      ) {
+        return false
+      }
+      if (tags.size > 0) {
+        const noteTags = parseLabelTags(b.label || '').tags
+        if (!noteTags.some(t => tags.has(t))) return false
+      }
+      return true
+    })
   })
 
   const sortedBearers = createMemo(() => {
@@ -797,284 +843,19 @@ const Wallet: Component = () => {
     }
     setSplittingSingle(true)
     try {
-      // the still-unspent remainder is tracked as an actual stored bearer
-      // throughout, starting as the selected note - never removed until a
-      // split for it has actually succeeded. A rejected split (e.g.
-      // "insufficient value" once its own base_fee_msat wouldn't leave
-      // enough change - see LUD-25) still puts that remainder's k1 on the
-      // wire via the failed callback request, so on failure it's rotated
-      // in place (best-effort) rather than left exposed - but always kept,
-      // never dropped, so a failed split costs nothing
-      let remainderId = bearer.id
-      let currentK1 = bearer.deviceId ? '' : requireNoteK1(bearer.url)
-      let currentUrl = bearer.url
-      let currentCallback = bearer.callback
-      let currentAmount = bearer.amount
-      let currentDeviceId = bearer.deviceId
-      // a mint MAY charge a flat fee per split (LUD-25), deducted from the
-      // change rather than the split-off amount - so the remainder is read
-      // back authoritatively (informational GET) after each split instead
-      // of just subtracting msat. Tracked per-iteration (perSplitFeeMsat,
-      // the same on every iteration since it's a flat fee) as well as
-      // summed (totalFeeMsat), so a multi-split report can say both "X per
-      // split" and "Y total" instead of one ambiguous number that reads
-      // like a single one-time deduction
-      let totalFeeMsat = 0
-      let perSplitFeeMsat = 0
-      const client = deviceClient()
-      if (bearer.deviceId) requireDeviceClient(client)
-      for (let i = 0; i < times; i++) {
-        const expectedChange = currentAmount - msat
-        if (client) {
-          // if a vault is connected, both outputs land on it - regardless
-          // of whether the input being split was itself device-backed
-          // (see deviceOrchestration.ts's "migration" note). No local
-          // rotate-in-place fallback on failure here (unlike the
-          // browser-only branch below): a failed device split never burns
-          // its input (that only happens once the mint call succeeds), so
-          // the existing remainder record is already correct as-is.
-          const parts = await deviceSplit(
-            client,
-            [{deviceId: currentDeviceId, url: currentUrl}],
-            currentCallback,
-            msat,
-            currentAmount
-          )
-          // past this point the input IS burned server-side, so both
-          // outputs are tracked BEFORE the remainder record is removed -
-          // otherwise a settle failure here would strand the change note
-          // (CONFIRMED on the device) with no local record. A failed
-          // settle still tracks a mirror of the raw output (unverified,
-          // at its expected pre-fee amount) and stops the chain; the next
-          // device refresh repairs it
-          let settledChange = parts.change
-          let changeVerified = false
-          let settleError: Error | null = null
-          try {
-            settledChange = await deviceSettle(client, parts.change)
-            changeVerified = true
-          } catch (err) {
-            settleError = new Error(
-              `Settling the change note didn't complete (${(err as Error).message}) - it's kept as an unverified note; refresh it with the vault connected to repair.`
-            )
+      const {totalFeeMsat, lastFeeMsat: perSplitFeeMsat} =
+        await splitBearerIntoAmounts(
+          bearer,
+          Array<SplitTarget>(times).fill({amountMsat: msat}),
+          {
+            addBearer,
+            updateBearer,
+            removeBearer,
+            logActivity,
+            deviceClient,
+            requireDeviceClient
           }
-          await addBearer({
-            url: parts.target.url,
-            callback: parts.target.callback,
-            amount: msat,
-            verified: true,
-            mintPubkey: bearer.mintPubkey,
-            deviceId: parts.target.deviceId,
-            deviceHash: parts.target.deviceHash
-          })
-          const remainder = await addBearer({
-            url: settledChange.url,
-            callback: settledChange.callback,
-            amount: settledChange.amountMsat,
-            verified: changeVerified,
-            mintPubkey: bearer.mintPubkey,
-            deviceId: settledChange.deviceId,
-            deviceHash: settledChange.deviceHash
-          })
-          removeBearer(remainderId)
-          remainderId = remainder.id
-          if (settleError) throw settleError
-          perSplitFeeMsat = expectedChange - settledChange.amountMsat
-          totalFeeMsat += perSplitFeeMsat
-          currentAmount = settledChange.amountMsat
-          currentUrl = settledChange.url
-          currentCallback = settledChange.callback
-          currentDeviceId = settledChange.deviceId
-          continue
-        }
-
-        let partK1 = ''
-        let partSignature: string | undefined
-        let changeK1 = ''
-        let changeSignature: string | undefined
-        let splitError: Error | null = null
-        try {
-          const result = await splitNote(currentCallback, [currentK1], msat)
-          partK1 = result.k1
-          partSignature = result.signature
-          changeK1 = result.change
-          changeSignature = result.changeSignature
-        } catch (err) {
-          splitError = err as Error
-        }
-        if (splitError) {
-          // a single-k1 request, so a NoteSpentError here is unambiguous:
-          // it's remainderId that's already gone, not some other selected
-          // note - lock it the same way refresh does, and skip the
-          // rotate-in-place attempt below (there's nothing left to rotate)
-          if (splitError instanceof NoteSpentError) {
-            await updateBearer(remainderId, {spent: true})
-            logActivity(
-              'spent',
-              `${serverOf(currentUrl)} reports ${msatToSats(currentAmount)} sats as already spent - marked spent locally.`,
-              bearer.label
-            )
-            throw splitError
-          }
-          if (splitError instanceof AmbiguousMutationError) {
-            // the split request may have landed despite the failure -
-            // probe the remainder's k1 before deciding what the secrets
-            // it carried are worth
-            const outcome = await probeBurnedNote(currentUrl)
-            if (outcome === 'gone') {
-              // the burn landed - the carried secrets are the only money
-              // left; fall through to record both outputs below
-              partK1 = splitError.newSecrets[0]
-              changeK1 = splitError.newSecrets[1]
-            } else if (outcome === 'unknown') {
-              // can't tell: track both possible outputs without dropping
-              // the remainder, and stop the chain here
-              await addBearer({
-                url: withNewK1(currentUrl, splitError.newSecrets[0], msat),
-                callback: currentCallback,
-                amount: msat,
-                verified: false,
-                mintPubkey: bearer.mintPubkey
-              })
-              await addBearer({
-                url: withNewK1(
-                  currentUrl,
-                  splitError.newSecrets[1],
-                  expectedChange
-                ),
-                callback: currentCallback,
-                amount: expectedChange,
-                verified: false,
-                mintPubkey: bearer.mintPubkey
-              })
-              throw new Error(
-                'The split may have gone through but could not be confirmed - the possible outputs are stored unverified alongside your original note; refresh them to reconcile.'
-              )
-            }
-            // 'live': the request never landed - same as a definitive
-            // rejection, handled below
-          }
-          if (!partK1) {
-            // a definitive rejection (or a probe showing nothing burned)
-            // still puts the remainder's k1 on the wire via the failed
-            // callback request, so it's rotated in place (best-effort)
-            // rather than left exposed - but always kept, never dropped,
-            // so a failed split costs nothing
-            try {
-              const rotated = await rotateNote(currentCallback, currentK1)
-              await updateBearer(remainderId, {
-                url: withNewK1(
-                  currentUrl,
-                  rotated.k1,
-                  currentAmount,
-                  rotated.signature
-                )
-              })
-            } catch (err) {
-              // this rotate is itself a mutating request, so a transport
-              // failure here is exactly as ambiguous as the split's own -
-              // it may have landed despite the failure, and the fresh
-              // secret it carries would then be the ONLY copy of the
-              // remainder left (the pre-attempt one now burned). Silently
-              // swallowing this (as this code used to) turned a purely
-              // defensive "don't leave k1 exposed" step into real fund
-              // loss: the remainder would vanish entirely, with neither
-              // the old record (burned) nor the new secret (discarded)
-              // pointing to real money - see issue report "split failed
-              // due to minimum amount, note gone"
-              if (err instanceof AmbiguousMutationError) {
-                const outcome = await probeBurnedNote(currentUrl)
-                if (outcome === 'gone') {
-                  // the rotate landed - its carried secret is the only
-                  // money left
-                  await updateBearer(remainderId, {
-                    url: withNewK1(currentUrl, err.newSecrets[0], currentAmount)
-                  })
-                } else if (outcome === 'unknown') {
-                  // can't tell: keep the pre-rotate record (already
-                  // shown below) AND track the possible rotated copy,
-                  // rather than gamble either way
-                  await addBearer({
-                    url: withNewK1(
-                      currentUrl,
-                      err.newSecrets[0],
-                      currentAmount
-                    ),
-                    callback: currentCallback,
-                    amount: currentAmount,
-                    verified: false,
-                    mintPubkey: bearer.mintPubkey
-                  })
-                  notify(
-                    "Couldn't confirm whether the remainder's defensive rotation went through - a possible rotated copy is stored unverified alongside it; refresh both to reconcile.",
-                    NotifyKind.ERROR
-                  )
-                }
-                // 'live': the rotate never landed - the pre-attempt secret
-                // (already recorded) is still good, nothing to change
-              }
-              // any other failure (rotation unsupported/unreachable, a
-              // definitive rejection) leaves the remainder recorded under
-              // its pre-attempt secret rather than vanish
-            }
-            throw splitError
-          }
-        }
-        // the split burned the remainder server-side from here on, so both
-        // outputs are recorded BEFORE its record is removed; the change is
-        // then settled in place - a failed settle leaves it as an
-        // unverified note a refresh can repair, not a lost secret
-        await addBearer({
-          url: withNewK1(currentUrl, partK1, msat, partSignature),
-          callback: currentCallback,
-          amount: msat,
-          verified: true,
-          mintPubkey: bearer.mintPubkey
-        })
-        const remainder = await addBearer({
-          url: withNewK1(currentUrl, changeK1, expectedChange, changeSignature),
-          callback: currentCallback,
-          amount: expectedChange,
-          verified: false,
-          mintPubkey: bearer.mintPubkey
-        })
-        removeBearer(remainderId)
-        remainderId = remainder.id
-        // settleNote learns the change's true value (a mint MAY have
-        // deducted a fee - LUD-25) by hash, without another rotation
-        try {
-          const settled = await settleNote(
-            currentUrl,
-            changeK1,
-            expectedChange,
-            changeSignature
-          )
-          perSplitFeeMsat = expectedChange - settled.amountMsat
-          totalFeeMsat += perSplitFeeMsat
-          currentAmount = settled.amountMsat
-          currentK1 = settled.k1
-          currentUrl = withNewK1(
-            currentUrl,
-            settled.k1,
-            settled.amountMsat,
-            settled.signature
-          )
-          currentCallback = settled.callback
-          await updateBearer(remainderId, {
-            url: currentUrl,
-            callback: currentCallback,
-            amount: currentAmount,
-            verified: true
-          })
-        } catch (err) {
-          // the change is already recorded above - stop the chain with it
-          // kept as an unverified note rather than risk splitting further
-          // from a value this wallet hasn't confirmed
-          throw new Error(
-            `Settling the change note didn't complete (${(err as Error).message}) - it's kept as an unverified note; refresh it to repair.`
-          )
-        }
-      }
+        )
       const feeNote =
         totalFeeMsat > 0
           ? times > 1
@@ -1690,6 +1471,7 @@ const Wallet: Component = () => {
                   fallback={
                     <button
                       type="button"
+                      class="search-toggle-btn"
                       title="Search notes by mint or amount"
                       onClick={() => setShowSearch(true)}
                     >
@@ -1740,6 +1522,7 @@ const Wallet: Component = () => {
                 <div class="sort-menu" ref={el => (sortMenuRef = el)}>
                   <button
                     type="button"
+                    class="sort-toggle-btn"
                     title={`Sort by ${sortKey()} (${sortDesc() ? 'descending' : 'ascending'})`}
                     onClick={() => setShowSortMenu(v => !v)}
                   >
@@ -1790,6 +1573,7 @@ const Wallet: Component = () => {
                 <Show when={spentCount() > 0}>
                   <button
                     type="button"
+                    class="spent-btn"
                     classList={{active: showSpent()}}
                     title="Spent notes are locally locked (melted, or marked by hand) - this just shows or hides them, it doesn't change anything about them"
                     onClick={() => setShowSpent(v => !v)}
@@ -1801,6 +1585,7 @@ const Wallet: Component = () => {
                 </Show>
                 <button
                   type="button"
+                  class="group-btn"
                   classList={{active: groupByMint()}}
                   title="Show notes grouped under their issuing mint instead of one flat list"
                   onClick={() => setGroupByMint(!groupByMint())}
@@ -1808,10 +1593,42 @@ const Wallet: Component = () => {
                   <IoLayersSharp />
                   <span class="btn-label">&nbsp;Group</span>
                 </button>
+                <Show when={availableTags().length > 0}>
+                  <div class="more-menu" ref={el => (tagMenuRef = el)}>
+                    <button
+                      type="button"
+                      class="icon-btn list-more-btn"
+                      classList={{active: selectedTags().size > 0}}
+                      title={
+                        selectedTags().size > 0
+                          ? `Filtering by ${selectedTags().size} tag${selectedTags().size === 1 ? '' : 's'} - click to change`
+                          : 'Filter by tag'
+                      }
+                      onClick={() => setShowTagMenu(v => !v)}
+                    >
+                      <IoPricetagsSharp />
+                    </button>
+                    <Show when={showTagMenu()}>
+                      <div class="more-menu-panel tag-menu-panel">
+                        <For each={availableTags()}>
+                          {tag => (
+                            <button
+                              type="button"
+                              classList={{active: selectedTags().has(tag)}}
+                              onClick={() => toggleTag(tag)}
+                            >
+                              {decodeTag(tag)}
+                            </button>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                  </div>
+                </Show>
                 <div class="more-menu" ref={el => (listMoreMenuRef = el)}>
                   <button
                     type="button"
-                    class="icon-btn"
+                    class="icon-btn list-more-btn"
                     title="More actions - rotate all, remove all spent"
                     onClick={() => setShowListMoreMenu(v => !v)}
                   >

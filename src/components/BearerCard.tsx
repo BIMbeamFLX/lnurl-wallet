@@ -1,5 +1,5 @@
 import type {Component} from 'solid-js'
-import {Show, createMemo, createSignal} from 'solid-js'
+import {Show, For, createMemo, createSignal} from 'solid-js'
 import {
   IoTrashSharp,
   IoShieldCheckmarkSharp,
@@ -23,7 +23,8 @@ import {
   serviceOriginOf,
   toBech32Lnurl,
   verifyNoteSignature,
-  verifyNoteSignatureHash
+  verifyNoteSignatureHash,
+  withoutSignature
 } from '../lnurlcash'
 import {
   deviceExportForHandoff,
@@ -47,6 +48,7 @@ import {
 import Qr from './Qr'
 import FiatValue from './FiatValue'
 import Dialog from './Dialog'
+import {decodeTag, parseLabelTags} from '../noteTags'
 
 export type BearerCardProps = {
   bearer: Bearer
@@ -78,9 +80,17 @@ const BearerCard: Component<BearerCardProps> = props => {
   // tap-to-reveal on the QR itself - a shoulder-surfing guard, so the note's
   // actual secret never sits bare on screen just because the panel is open
   const [qrRevealed, setQrRevealed] = createSignal(false)
+  // opt out of handing over this note's offline-verification sig (see
+  // withoutSignature) - off by default, so the QR/copy keep behaving
+  // exactly as before unless the holder deliberately strips it
+  const [stripSignature, setStripSignature] = createSignal(false)
 
   const k1 = () => noteK1(props.bearer.url) || ''
   const isSpent = () => !!props.bearer.spent
+
+  // a leading run of [tag] brackets on the label (see noteTags.ts) reads as
+  // this note's tags; whatever's left after them is the free-text label
+  const parsedLabel = createMemo(() => parseLabelTags(props.bearer.label || ''))
 
   // this note's issuing mint's self-reported node color (cached via the
   // mint-address lookup, see trustedMints.ts) - tints the card's own
@@ -142,6 +152,8 @@ const BearerCard: Component<BearerCardProps> = props => {
       getTrustedMintPubkey(origin) ??
       (isMintUnconfirmed(origin) ? null : (props.bearer.mintPubkey ?? null))
     if (!sig || !mintPubkey) return false
+    // verifyNoteSignature itself dispatches on k1's own shape (legacy
+    // preimage vs LUD-25 Part 2 ck1 signature) - see signature.ts
     return props.bearer.deviceHash
       ? verifyNoteSignatureHash(
           props.bearer.deviceHash,
@@ -189,6 +201,7 @@ const BearerCard: Component<BearerCardProps> = props => {
     setUnveiling(false)
     setRevealedUrl(null)
     setQrRevealed(false)
+    setStripSignature(false)
   }
 
   const revealDeviceNote = async () => {
@@ -247,7 +260,14 @@ const BearerCard: Component<BearerCardProps> = props => {
             <FiatValue msat={props.bearer.amount} />
           </span>
           <Show when={props.bearer.label && !isSpent()}>
-            <span class="bearer-label">{props.bearer.label}</span>
+            <div class="bearer-tags-row">
+              <For each={parsedLabel().tags}>
+                {tag => <span class="bearer-tag">{decodeTag(tag)}</span>}
+              </For>
+              <Show when={parsedLabel().text}>
+                <span class="bearer-label">{parsedLabel().text}</span>
+              </Show>
+            </div>
           </Show>
           <div class="bearer-badges">
             <Show when={sunsetDate()}>
@@ -363,7 +383,20 @@ const BearerCard: Component<BearerCardProps> = props => {
           }
         >
           <Dialog onClose={cancelUnveil}>
-            <h4>Hand over {msatToSats(props.bearer.amount)} sats</h4>
+            <div class="dialog-title-row">
+              <h4>Hand over {msatToSats(props.bearer.amount)} sats</h4>
+              <label
+                class="strip-sig-toggle"
+                title="Unchecking this strips the sig from the QR/copied note before handing it over, so it can no longer be checked offline against the issuing mint's pinned key"
+              >
+                <input
+                  type="checkbox"
+                  checked={!stripSignature()}
+                  onChange={e => setStripSignature(!e.currentTarget.checked)}
+                />
+                &nbsp;Offline verified
+              </label>
+            </div>
             <Show
               when={revealedUrl()}
               fallback={
@@ -380,34 +413,40 @@ const BearerCard: Component<BearerCardProps> = props => {
                 </div>
               }
             >
-              {url => (
-                <>
-                  <div class="qr-wrapper">
-                    <Qr value={toBech32Lnurl(url())} />
-                    <Show when={!qrRevealed()}>
+              {url => {
+                const handoverUrl = () =>
+                  stripSignature() ? withoutSignature(url()) : url()
+                return (
+                  <>
+                    <div class="qr-wrapper">
+                      <Qr value={toBech32Lnurl(handoverUrl())} />
+                      <Show when={!qrRevealed()}>
+                        <button
+                          class="qr-overlay"
+                          title="Show QR code - it IS the bearer note, anyone who scans it can spend it"
+                          onClick={() => setQrRevealed(true)}
+                        >
+                          <IoEyeSharp />
+                        </button>
+                      </Show>
+                    </div>
+                    <div class="btns">
                       <button
-                        class="qr-overlay"
-                        title="Show QR code - it IS the bearer note, anyone who scans it can spend it"
-                        onClick={() => setQrRevealed(true)}
+                        onClick={() =>
+                          copyToClipboard(toBech32Lnurl(handoverUrl()))
+                        }
                       >
-                        <IoEyeSharp />
+                        <IoCopySharp />
+                        &nbsp;Copy note
                       </button>
-                    </Show>
-                  </div>
-                  <div class="btns">
-                    <button
-                      onClick={() => copyToClipboard(toBech32Lnurl(url()))}
-                    >
-                      <IoCopySharp />
-                      &nbsp;Copy note
-                    </button>
-                    <button onClick={markHandedOver}>
-                      <IoCheckmarkSharp />
-                      &nbsp;Mark done
-                    </button>
-                  </div>
-                </>
-              )}
+                      <button onClick={markHandedOver}>
+                        <IoCheckmarkSharp />
+                        &nbsp;Mark done
+                      </button>
+                    </div>
+                  </>
+                )
+              }}
             </Show>
           </Dialog>
         </Show>

@@ -1,6 +1,7 @@
 import {HDKey, HARDENED_OFFSET} from '@scure/bip32'
 import {bytesToHex} from '@noble/hashes/utils.js'
 import {lud05PathSuffix} from './keys'
+import {deriveNoteSecretKey, type Cx1} from './lib/recoverableNotes'
 
 // LUD-25 Seed-recoverable note secrets: deterministic secrets for the notes
 // this wallet mints/rotates/splits/merges, derived from the seed instead of
@@ -76,12 +77,15 @@ export const clearCashSecretIndices = (): void => {
 // recovery scan hang their per-index children off - null whenever no cash
 // root is loaded (locked, or a wallet that hasn't re-entered its seed since
 // this feature shipped)
-const domainNode = (domain: string): HDKey | null => {
-  if (!cashRoot) return null
-  const hashingNode = cashRoot.deriveChild(0)
+const domainNode = (
+  domain: string,
+  root: HDKey | null = cashRoot
+): HDKey | null => {
+  if (!root) return null
+  const hashingNode = root.deriveChild(0)
   if (!hashingNode.privateKey) return null
   const suffix = lud05PathSuffix(hashingNode.privateKey, domain)
-  let node = cashRoot
+  let node = root
   for (const index of suffix) node = node.deriveChild(index)
   return node
 }
@@ -96,6 +100,70 @@ export const cashSecretAtIndex = (
 ): string | null => {
   const node = domainNode(domain)?.deriveChild(index + HARDENED_OFFSET)
   return node?.privateKey ? bytesToHex(node.privateKey) : null
+}
+
+// LUD-25 Part 2: a second, sibling purpose under the same m/139' root -
+// m/139'/1' - dedicated to watch-only address branches (a domain's cx1
+// export), so it never shares key material with m/139'/0 (cashHashingKey
+// above). Nothing about the existing m/139'/0/d1/d2/d3/d4/i' hardened-
+// secret derivation changes - this is purely additive, and every existing
+// note/backup derived under it keeps working byte-for-byte forever.
+const addressDomainNode = (domain: string): HDKey | null => {
+  if (!cashRoot) return null
+  const addressRoot = cashRoot.deriveChild(1 + HARDENED_OFFSET) // m/139'/1'
+  const hashingNode = addressRoot.deriveChild(0) // m/139'/1'/0
+  if (!hashingNode.privateKey) return null
+  const suffix = lud05PathSuffix(hashingNode.privateKey, domain)
+  let node = addressRoot
+  for (const index of suffix) node = node.deriveChild(index)
+  return node // m/139'/1'/d1/d2/d3/d4
+}
+
+// the watch-only branch this domain's cx1 export names - null whenever no
+// cash root is loaded, same as domainNode above. `pubkeyXOnly` drops the
+// HDKey publicKey's leading 02/03 compressed-form byte: a plain x-
+// coordinate is exactly BIP-340's x-only encoding regardless of which y
+// the underlying point actually has (see deriveNoteSecretKey's own parity
+// handling in src/lib/recoverableNotes.ts, which takes the raw, unmodified
+// private key and corrects for this internally - nothing here needs to).
+export const cashAddressBranch = (domain: string): Cx1 | null => {
+  const node = addressDomainNode(domain)
+  const publicKey = node?.publicKey
+  const chainCode = node?.chainCode
+  if (!publicKey || !chainCode) return null
+  return {pubkeyXOnly: publicKey.slice(1), chainCode}
+}
+
+// this note's own bearer secret on the address branch - an actual
+// secp256k1 scalar (see deriveNoteSecretKey), never a hex preimage the way
+// cashSecretAtIndex's legacy notes are. Pure - no counter side effect, so
+// a recovery scan can probe index by index (LUD-25's gap-limit convention)
+// without any bookkeeping of its own: unlike a wallet-initiated secret
+// (nextCashSecret below), a note here arrives unsolicited - the mint picks
+// the index, not this wallet - so there is nothing to "claim" ahead of
+// time, only ever a range to check.
+export const cashAddressSecretAtIndex = (
+  domain: string,
+  index: number
+): Uint8Array | null => {
+  const node = addressDomainNode(domain)
+  if (!node?.privateKey || !node.chainCode) return null
+  return deriveNoteSecretKey(node.privateKey, node.chainCode, index)
+}
+
+/** Derive the same LUD-25 secret without global state or browser storage. */
+export const cashSecretFromRoot = (
+  root: HDKey,
+  domain: string,
+  index: number
+): string => {
+  if (!Number.isSafeInteger(index) || index < 0 || index >= HARDENED_OFFSET)
+    throw new Error('Invalid cash index.')
+  const key = domainNode(domain, root)?.deriveChild(
+    index + HARDENED_OFFSET
+  ).privateKey
+  if (!key) throw new Error('Cannot derive cash secret.')
+  return bytesToHex(key)
 }
 
 export const nextCashSecretIndex = (domain: string): number =>

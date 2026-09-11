@@ -58,10 +58,10 @@ footer {
   }
 }
 
-// one section of the footer (version, Github, the privacy note, the LUD
-// list) - the "|" between them is a generated pseudo-element rather than
-// markup, so the mobile breakpoint can drop it for a stacked layout without
-// touching Footer.tsx
+// one section of the footer (version/Github row, the privacy note) - the
+// "|" between them is a generated pseudo-element rather than markup, so the
+// mobile breakpoint can drop it for a stacked layout without touching
+// Footer.tsx
 .footer-item {
   display: flex;
   align-items: center;
@@ -124,7 +124,7 @@ h2 {
 // from the left edge by its own padding, out of line with the note grid and
 // every other section below it, none of which are boxed either
 .wallet-hero {
-  margin: 0 0 24px 0;
+  margin: 0 0 12px 0;
 }
 
 // Mint - the wallet's one remaining explicit shortcut, sized up from the
@@ -366,6 +366,18 @@ a:where(.icon-btn, .link-btn) {
 // active={...}, same pattern as .list-controls-row > button.active below) -
 // without this they carried the "active" class but no visual to show it
 .setup-card .btns button.active {
+  opacity: 1;
+  box-shadow: inset 0 0 0 1px $font-color;
+  background-color: rgba(
+    color.adjust($accent-base, $lightness: -10%),
+    $transparency
+  );
+}
+
+// the addon builder's Form/Raw JSON/Visual toggle (Settings.tsx) lives
+// inside a Dialog, not a .setup-card - same active-state rule, different
+// selector, so those buttons actually show which view is selected
+.dialog .btns button.active {
   opacity: 1;
   box-shadow: inset 0 0 0 1px $font-color;
   background-color: rgba(
@@ -1047,7 +1059,7 @@ nav {
 // their own row above .selection-toolbar (which is about acting on
 // whatever's currently selected, not how the list looks or what's picked)
 .list-controls {
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 .list-controls-row {
@@ -1167,6 +1179,14 @@ nav {
   }
 }
 
+// the tag filter's own panel (see Wallet.tsx) can list far more entries
+// than Sort's fixed two or More's fixed handful - caps it to a scrollable
+// height instead of letting a long tag list push the rest of the page down
+.tag-menu-panel {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
 @media (max-width: 700px) {
   // icons only for the note-action row on a small screen - Rotate/Split/
   // Combine/etc's labels (.btn-label, set on each button above) just crowd
@@ -1192,14 +1212,37 @@ nav {
     background: rgba($bg, 0.95);
     padding: 8px 0;
   }
+  // symmetric icon-sized padding, so every button in these two rows ends
+  // up the same height on a small screen - without this, .search-toggle-btn/
+  // .spent-btn/.group-btn (icon-only once their label's gone) and
+  // .sort-toggle-btn (never loses its label, but still needs to match)
+  // keep the base button rule's 6px 14px, shorter than the rest here; the
+  // action row's own buttons had a similarly-cramped 10px override,
+  // bumped up alongside these for the same reason
   .refresh-btn,
   .split-single-btn,
   .combine-btn,
   .split-btn,
   .transfer-btn,
   .more-btn,
-  .clear-selection-btn {
-    padding: 10px;
+  .clear-selection-btn,
+  .search-toggle-btn,
+  .sort-toggle-btn,
+  .spent-btn,
+  .group-btn,
+  .list-more-btn {
+    padding: 12px;
+  }
+  // the More actions panel (both the selection toolbar's and the list
+  // filter's) sits near the row's right edge once labels collapse it
+  // there - left:0 (its default, fine on a wide desktop row) expands the
+  // panel rightward off the edge of a narrow screen and gets clipped.
+  // Sort's own dropdown reuses .more-menu-panel too but stays near the
+  // row's left edge, so it's excluded here - flipping it as well would
+  // just move the same cutoff to its left side instead
+  .more-menu .more-menu-panel {
+    left: auto;
+    right: 0;
   }
 }
 
@@ -1450,6 +1493,27 @@ nav {
   overflow-wrap: anywhere;
 }
 
+// wraps a label's own leading [tag] pills (see noteTags.ts) alongside
+// whatever free text follows them, so a long tag list wraps onto its own
+// lines without dragging the label's italic caption along with it
+.bearer-tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.bearer-tag {
+  font-size: 0.75em;
+  padding: 1px 7px;
+  border-radius: 10px;
+  opacity: 0.9;
+  background-color: rgba(
+    color.adjust($accent-base, $lightness: -10%),
+    $transparency
+  );
+}
+
 .bearer-actions {
   display: flex;
   align-items: center;
@@ -1536,18 +1600,35 @@ nav {
   }
 }
 
+// a real grid instead of organic flex-wrap: a card's width should be its
+// column's width, not an arbitrary cap that leaves dead space beside a
+// lone card on a mid-width screen (see the mobile override below) - 2
+// columns is the desktop default, widening to 3 once a column has enough
+// room to comfortably fit a card's Mint/Rescan row without cramping it
 .mint-list {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
   gap: 21px;
+}
+
+@media (min-width: 1400px) {
+  .mint-list {
+    grid-template-columns: repeat(3, 1fr);
+  }
 }
 
 .mint-card {
   display: block;
-  max-width: 320px;
   h4 {
     overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 700px) {
+  // one full-width column instead of two cramped ones - same reasoning as
+  // .two-columns's own mobile collapse just above
+  .mint-list {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1658,6 +1739,30 @@ nav {
   z-index: 1;
 }
 
+// a dialog title sharing its row with a right-aligned action (e.g.
+// BearerCard's strip-sig toggle) - padding-right clears .dialog-close-btn's
+// own fixed top-right corner so the two never overlap
+.dialog-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-right: 34px;
+  h4 {
+    margin: 0;
+  }
+  // overrides label's own block/margin-top - inline and vertically centered
+  // against the title next to it, not stacked below like a normal form label
+  label {
+    display: flex;
+    align-items: center;
+    margin: 0;
+    font-size: 0.9em;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+}
+
 @media (max-width: 700px) {
   // full-screen instead of a floating centered card - more screen for the
   // dialog's own content on a small viewport, and the close button (still
@@ -1757,4 +1862,125 @@ nav {
     width: 100%;
     max-width: 420px;
   }
+}
+
+// ---- addons ----
+
+// the declarative addon DSL's own rendered output (see src/addons/Renderer.tsx)
+// - deliberately plain/generic since every addon shares this one stylesheet,
+// same reasoning .docs-card etc already follow
+.addon-root {
+  max-width: 480px;
+}
+
+.addon-heading {
+  font-size: 1.3em;
+  font-weight: bold;
+  margin: 0 0 8px 0;
+}
+
+.addon-subheading {
+  font-size: 1.05em;
+  font-weight: bold;
+  margin: 16px 0 4px 0;
+}
+
+.addon-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  > button {
+    margin-right: 0;
+  }
+}
+
+.addon-field {
+  min-width: 0;
+  input,
+  select {
+    display: block;
+  }
+}
+
+.addon-ticket {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  margin: 0 12px 12px 0;
+  .qrcode {
+    max-width: 140px;
+  }
+}
+
+// the raw-JSON addon builder/editor (see Settings.tsx's Addons column) -
+// wide and monospace so a manifest's structure is actually readable while
+// editing
+.addon-builder-textarea {
+  width: 100%;
+  min-height: 320px;
+  font-family: monospace;
+  font-size: 0.85em;
+  white-space: pre;
+  resize: vertical;
+}
+
+// one permission entry in the addon builder's form view - bordered so a
+// list of several is visually separable without a table
+.addon-form-permission {
+  border: 1px solid rgba($font-color, 0.3);
+  border-radius: 5px;
+  padding: 8px;
+  margin-top: 8px;
+}
+
+.addon-form-note {
+  opacity: 0.7;
+}
+
+// a scoped Expr/Action JSON snippet (UiBuilder.tsx's Advanced tabs) - same
+// monospace treatment as the top-level .addon-builder-textarea, just
+// shorter since it only ever holds one field's worth of JSON
+.addon-builder-textarea-small {
+  min-height: unset;
+}
+
+// the Visual tab's outliner + inspector (UiBuilder.tsx)
+.ui-builder {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.ui-outliner {
+  flex: 1 1 220px;
+  min-width: 200px;
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid rgba($font-color, 0.3);
+  border-radius: 5px;
+  padding: 4px;
+}
+
+.ui-outliner-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border-radius: 3px;
+  &.selected {
+    box-shadow: inset 0 0 0 1px $font-color;
+    background-color: rgba(
+      color.adjust($accent-base, $lightness: -10%),
+      $transparency
+    );
+  }
+}
+
+.ui-inspector {
+  flex: 1 1 260px;
+  min-width: 240px;
+  border: 1px solid rgba($font-color, 0.3);
+  border-radius: 5px;
+  padding: 8px;
 }
