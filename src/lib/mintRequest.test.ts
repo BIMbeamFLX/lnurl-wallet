@@ -44,8 +44,8 @@ const signAsMintForId = (
   )
 }
 
-describe('fetchPayRequest - LUD-25 Part 2 internal transfer hint', () => {
-  it('wires a text/xpub metadata entry through to internalTransfer', async () => {
+describe('fetchPayRequest - LUD-25 internal transfer hint', () => {
+  it('wires a text/cpub metadata entry through to internalTransfer', async () => {
     const cx1 = encodeCx1(
       schnorr.getPublicKey(schnorr.utils.randomSecretKey()),
       hexToBytes('ab'.repeat(32))
@@ -62,7 +62,7 @@ describe('fetchPayRequest - LUD-25 Part 2 internal transfer hint', () => {
               maxSendable: 1_000_000,
               metadata: JSON.stringify([
                 ['text/plain', 'alice@mint.example.com'],
-                ['text/xpub', `${cx1}:3`]
+                ['text/cpub', `${cx1}:3`]
               ])
             })
           }) as Response
@@ -73,7 +73,7 @@ describe('fetchPayRequest - LUD-25 Part 2 internal transfer hint', () => {
     expect(info.internalTransfer?.cx1).toBeDefined()
   })
 
-  it('leaves internalTransfer undefined without a text/xpub entry', async () => {
+  it('leaves internalTransfer undefined without a text/cpub entry', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(
@@ -170,7 +170,7 @@ describe('bound-mint receipt authentication', () => {
   })
 })
 
-describe('requestInvoice - LUD-25 Part 2 cp1 comment', () => {
+describe('requestInvoice - LUD-25 cp1 comment', () => {
   it('sends a cp1 pubkey as comment alone (no redundant h)', async () => {
     const notePubkey = schnorr.getPublicKey(schnorr.utils.randomSecretKey())
     const cp1 = encodeCp1(notePubkey)
