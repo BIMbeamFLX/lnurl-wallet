@@ -55,7 +55,10 @@
 //   history has no fork and no look-alike in it - checked offline
 //   (sealCertificateProblem), against nothing but the mint's signing key.
 //   A consignment from a mint that issues none stays valid, just
-//   uncertified.
+//   uncertified. Two things a certified history still does not say: that
+//   its LAST note is unspent (only the mint knows), and who issued the
+//   seal - certificates start at the first transition, so the genesis is
+//   vouched for by nothing but its own owner key and the mint it sits at.
 //
 //   Encoded the same way this kit encodes every other wire value it
 //   invents (see src/lib/recoverableNotes.ts's own top comment) - a single
@@ -464,7 +467,9 @@ const decodeSealCertificate = (
 //   || (u16 len(cert) || CERTIFICATE_TAG || u32 stateIndex || sig(65))*
 //
 // Certificates come after every state and are optional, so a consignment
-// with none is byte-for-byte what it was before they existed.
+// with none is byte-for-byte what it was before they existed. The other
+// direction does not hold: a wallet from before certificates reads a
+// certificate as a malformed state and rejects the whole consignment.
 //
 // u64, not u32 like cw1's own locktime/sequence fields: amountMsat isn't
 // Bitcoin-consensus-bounded the way those are, and u32's ~4.29 billion

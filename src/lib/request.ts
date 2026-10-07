@@ -561,7 +561,23 @@ export const mergeNotesWithHashShort = (
   h: string
 ): Promise<HashedMutationResult> => mergeNotesWithHash(callback, k1s, h, true)
 
-export type RotateResult = {k1: string; signature?: string}
+export type RotateResult = {
+  k1: string
+  signature?: string
+  // a rotate's rotation certificate, when SERVICE sent one - see
+  // HashedMutationResult. Never set by mergeNotes.
+  rotation?: string
+}
+
+// rotateNoteWithHash's own result, around the fresh secret it was for
+const rotateResult = (
+  k1: string,
+  result: HashedMutationResult
+): RotateResult => ({
+  k1,
+  signature: result.signature,
+  ...(result.rotation === undefined ? {} : {rotation: result.rotation})
+})
 
 // An output whose OWN k1 already proves key ownership - ck1 directly, or a
 // script-path note's cw1 (its leaf's own signature, or for a keyless leaf
@@ -634,8 +650,10 @@ export const rotateNote = async (
 ): Promise<RotateResult> => {
   const newK1 = generateOutputSecret(serverOf(callback), isUpgradedSecret(k1))
   try {
-    const result = await rotateNoteWithHash(callback, k1, disclosedValue(newK1))
-    return {k1: newK1, signature: result.signature}
+    return rotateResult(
+      newK1,
+      await rotateNoteWithHash(callback, k1, disclosedValue(newK1))
+    )
   } catch (err) {
     // the request may have landed - the fresh secret is then the only copy
     // of the rotated note, so it rides the error rather than vanishing
@@ -668,8 +686,10 @@ export const upgradeNote = async (
     )
   }
   try {
-    const result = await rotateNoteWithHash(callback, k1, disclosedValue(newK1))
-    return {k1: newK1, signature: result.signature}
+    return rotateResult(
+      newK1,
+      await rotateNoteWithHash(callback, k1, disclosedValue(newK1))
+    )
   } catch (err) {
     // the request may have landed - the fresh secret is then the only copy
     // of the upgraded note, so it rides the error rather than vanishing

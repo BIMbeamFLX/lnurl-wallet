@@ -11,13 +11,15 @@ import {
   isCs1WithAmount
 } from './recoverableNotes'
 import {
+  mergeNotes,
   mergeNotesWithHash,
+  rotateNote,
   rotateNoteWithHash,
   splitNoteWithHash
 } from './request'
 import {verifyNoteSignatureForKey, verifyRotationCertificate} from './signature'
 
-// pk_0 of 25.md's test vectors 1 and 2 - two real note keys
+// two real note keys: the pk_0 values specVectors.test.ts derives
 const SPENT = 'aad3a0e36c083eb0d2d92ec0860977dc46d10c952f31830e6443b1faa1997634'
 const NOTE = '01fee34e378bf66de6afa1bfa6e30f5c89551fd92bc1b089dca93c52b7ab61bc'
 
@@ -232,5 +234,18 @@ describe('rotateNoteWithHash: the rotation certificate SERVICE answers with', ()
     expect('rotation' in split).toBe(false)
     const merged = await mergeNotesWithHash(CALLBACK, [K1, 'd'.repeat(64)], H)
     expect('rotation' in merged).toBe(false)
+  })
+
+  it('rotateNote hands it on with the fresh secret; mergeNotes never has one', async () => {
+    answer({status: 'OK', c: CS1, r: CR1})
+    const rotated = await rotateNote(CALLBACK, K1)
+    expect(rotated.rotation).toBe(CR1)
+    expect(rotated.k1).toMatch(/^[0-9a-f]{64}$/)
+    answer({status: 'OK', c: CS1})
+    expect('rotation' in (await rotateNote(CALLBACK, K1))).toBe(false)
+    answer({status: 'OK', c: CS1, r: CR1})
+    expect(
+      'rotation' in (await mergeNotes(CALLBACK, [K1, 'd'.repeat(64)]))
+    ).toBe(false)
   })
 })
