@@ -55,6 +55,7 @@ import {
   type SealState
 } from './seals/seals'
 import {getTrustedMintPubkey} from '../trustedMints'
+import {IMAGE_MIME} from './imageData'
 import {fetchAddressSummary, fetchAddressUtxos} from './electrs/electrsClient'
 
 // the subset of WalletContext/DeviceContext a verb is allowed to touch -
@@ -603,8 +604,15 @@ export const VERBS: Record<string, VerbHandler> = {
     // Uint8Array's TS type is generic over its backing buffer
     // (ArrayBufferLike), while BlobPart insists on a concrete ArrayBuffer -
     // a real gap in lib.dom.d.ts's typing, not an actual runtime mismatch
+    // binary content is a PDF unless the addon says it is a picture - one
+    // of the two kinds the renderer itself knows (imageData.ts), never a
+    // free-form type an addon could pass off as something executable
+    const mime = String(args.mime ?? '')
+    const binaryType = Object.values(IMAGE_MIME).includes(mime)
+      ? mime
+      : 'application/pdf'
     const blob = new Blob([bytes as unknown as BlobPart], {
-      type: isBinary ? 'application/pdf' : 'text/plain'
+      type: isBinary ? binaryType : 'text/plain'
     })
     const url = URL.createObjectURL(blob)
     try {

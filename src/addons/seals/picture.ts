@@ -30,20 +30,24 @@
 import {sha256} from '@noble/hashes/sha2.js'
 import {bytesToHex, concatBytes, hexToBytes} from '@noble/hashes/utils.js'
 import {schnorr} from '@noble/curves/secp256k1.js'
-import {base64} from '@scure/base'
+import {
+  IMAGE_EXTENSION,
+  IMAGE_MIME,
+  imageDataUrl,
+  imageFormatOf,
+  imageFromDataUrl,
+  type ImageFormat
+} from '../imageData'
 import {decodeSealConsignment, type SealState} from './seals'
 
-export type PictureFormat = 'jpeg' | 'png'
-
-export const PICTURE_MIME: Record<PictureFormat, string> = {
-  jpeg: 'image/jpeg',
-  png: 'image/png'
-}
-
-export const PICTURE_EXTENSION: Record<PictureFormat, string> = {
-  jpeg: 'jpg',
-  png: 'png'
-}
+// a seal's picture is whatever the addon renderer itself calls a picture
+// (see ../imageData.ts) - a JPG or a PNG, as bytes or as a data URL
+export type PictureFormat = ImageFormat
+export const PICTURE_MIME = IMAGE_MIME
+export const PICTURE_EXTENSION = IMAGE_EXTENSION
+export const pictureFormatOf = imageFormatOf
+export const pictureFromDataUrl = imageFromDataUrl
+export const pictureDataUrl = imageDataUrl
 
 // what marks a COM segment / tEXt chunk as this envelope - a valid PNG
 // keyword (1-79 printable Latin-1 characters, no leading/trailing space)
@@ -76,13 +80,6 @@ const PNG_SIGNATURE = Uint8Array.of(
   0x1a,
   0x0a
 )
-
-export const pictureFormatOf = (bytes: Uint8Array): PictureFormat | null => {
-  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
-    return 'jpeg'
-  }
-  return startsWith(bytes, PNG_SIGNATURE) ? 'png' : null
-}
 
 // ---- JPG ----
 
@@ -426,36 +423,4 @@ export const sealPictureProblem = (states: unknown, bytes: unknown): string => {
   return hash === genesis.assetId
     ? ''
     : 'This is not the picture the seal was issued for - its bytes hash to something else. A screenshot, a resized or a recompressed copy is a different file.'
-}
-
-// ---- data URLs: how a picked file lives in an addon's own state ----
-//
-// State is plain JSON, so a picture is held as the `data:` URL the
-// ImagePicker bound - `data:image/jpeg;base64,...` or its PNG twin, never
-// anything else: no other type, and never a URL that would make a browser
-// fetch something.
-const DATA_URL = /^data:image\/(jpeg|png);base64,([A-Za-z0-9+/]*={0,2})$/
-
-export const pictureFromDataUrl = (value: unknown): Uint8Array | null => {
-  const dataUrl =
-    typeof value === 'string'
-      ? value
-      : (value as {dataUrl?: unknown} | null)?.dataUrl
-  const match = typeof dataUrl === 'string' ? DATA_URL.exec(dataUrl) : null
-  if (!match) return null
-  try {
-    const bytes = base64.decode(match[2]!)
-    // the URL's own type is only a label - the bytes decide
-    return pictureFormatOf(bytes) === match[1] ? bytes : null
-  } catch {
-    return null
-  }
-}
-
-export const pictureDataUrl = (bytes: unknown): string | null => {
-  if (!(bytes instanceof Uint8Array)) return null
-  const format = pictureFormatOf(bytes)
-  return format
-    ? `data:${PICTURE_MIME[format]};base64,${base64.encode(bytes)}`
-    : null
 }
