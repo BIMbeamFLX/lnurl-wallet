@@ -27,6 +27,7 @@ import {
   isCk1,
   isCw1,
   isPubkeyCommitment,
+  isCr1WithAmount,
   isCs1WithAmount,
   encodeCp1,
   outputKeyOfCw1
@@ -353,6 +354,8 @@ export type WithdrawSuccessResponse = {
   status: 'OK'
   c?: string
   c2?: string
+  // a rotate's rotation certificate (optional): see rotateNoteWithHash
+  r?: string
   // LUD-25 melt proof (optional): only present on a melt's response, and
   // only when SERVICE advertises it - see meltNote
   pr?: string
@@ -444,7 +447,14 @@ export const meltNote = async (
 // generateSecret(). rotateNote/splitNote/mergeNotes below are just the
 // caller-generates-its-own-secret case of these.
 
-export type HashedMutationResult = {signature?: string}
+export type HashedMutationResult = {
+  signature?: string
+  // a rotate only: SERVICE's cr1 certificate that the burned note became
+  // this one (signature.ts's verifyRotationCertificate). Optional on the
+  // wire - absent from a SERVICE that does not issue them, and never from a
+  // split or merge.
+  rotation?: string
+}
 
 // Key-path outputs must be certified. A plain hash output is
 // deliberately unsigned: there is no public note identifier to certify
@@ -475,7 +485,16 @@ export const rotateNoteWithHash = async (
     ['p1', refOf(h, short)]
   ])
   const signature = mutationSignature(body, 'c', h)
-  return signature === undefined ? {} : {signature}
+  // optional, so a malformed one is dropped rather than failing a rotate
+  // that already landed - whoever needs it verifies it, or retries for it
+  const rotation =
+    typeof body.r === 'string' && isCr1WithAmount(body.r)
+      ? body.r.trim()
+      : undefined
+  return {
+    ...(signature === undefined ? {} : {signature}),
+    ...(rotation === undefined ? {} : {rotation})
+  }
 }
 
 export type HashedSplitResult = {

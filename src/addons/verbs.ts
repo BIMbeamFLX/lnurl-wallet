@@ -16,6 +16,9 @@ import {
   requireNoteK1,
   rotateNoteWithHash,
   verifyNoteSignatureForKey,
+  verifyRotationCertificate,
+  NoteSpentError,
+  NoteUnknownError,
   noteSignature,
   settleNote,
   withNewK1,
@@ -43,11 +46,15 @@ import {
   fetchOracleAttestation
 } from './dlc/oracleClient'
 import {
+  decodeSealConsignment,
   redeemCurrentStateCw1,
   nextState,
   planSealLock,
+  sealCertificateProblem,
+  sealChainProblem,
   type SealState
 } from './seals/seals'
+import {getTrustedMintPubkey} from '../trustedMints'
 import {fetchAddressSummary, fetchAddressUtxos} from './electrs/electrsClient'
 
 // the subset of WalletContext/DeviceContext a verb is allowed to touch -
@@ -426,12 +433,15 @@ export const VERBS: Record<string, VerbHandler> = {
     )
     const next = nextState(currentState, nextOwnerPubkeyHex)
     const nextOutputKeyHex = planSealLock(next).outputKeyHex
+    let rotation: string | undefined
     try {
-      await rotateNoteWithHash(
-        info.callback,
-        cw1,
-        encodeCp1(hexToBytes(nextOutputKeyHex))
-      )
+      rotation = (
+        await rotateNoteWithHash(
+          info.callback,
+          cw1,
+          encodeCp1(hexToBytes(nextOutputKeyHex))
+        )
+      ).rotation
     } catch (err) {
       if (err instanceof AmbiguousMintError) {
         throw new Error(
@@ -440,10 +450,92 @@ export const VERBS: Record<string, VerbHandler> = {
       }
       throw err
     }
+    // the mint's own cr1 for this very rotate (see lib/signature.ts) - what
+    // the next consignment carries so its holder can tell this transition
+    // from a note minted on the side. Only handed on if it really is this
+    // mint's certificate for exactly this step: the key is the one this
+    // wallet pinned for the mint, else the one the lookup above reported.
+    // The transition itself has landed either way.
+    const mintPubkey =
+      getTrustedMintPubkey(serverOf(urlTemplate)) ?? info.mintPubkey
+    const certified =
+      !!rotation &&
+      verifyRotationCertificate(
+        currentOutputKeyHex,
+        nextOutputKeyHex,
+        info.maxWithdrawable,
+        rotation,
+        mintPubkey
+      )
     return {
       urlTemplate,
       amountMsat: info.maxWithdrawable,
-      state: next
+      state: next,
+      certificate: certified ? rotation : null
+    }
+  },
+
+  // The Seals addon's one online question, asked of the seal's own mint:
+  // is the note its CURRENT state locks to still there, unspent, and worth
+  // what the consignment says? Looked up by its public output key alone
+  // (`?p=cp1<Q>`), so nothing here could ever spend it. The same answer
+  // names the mint's signing key, which every transition's certificate is
+  // then checked against (sealCertificateProblem) - against the key this
+  // wallet already pinned for that mint, when it has one. Never throws for
+  // a seal that is simply gone: that is an answer, not an error.
+  'seal.check': async args => {
+    // echoed back so the addon only ever shows this answer under the very
+    // consignment it was asked about
+    const consignment = String(args.consignment ?? '').trim()
+    const parsed = decodeSealConsignment(consignment)
+    if (!parsed) throw new Error('Not a valid seal consignment.')
+    const chainProblem = sealChainProblem(parsed.states)
+    if (chainProblem) throw new Error(chainProblem)
+    const current = parsed.states[parsed.states.length - 1]!
+    const outputKeyHex = planSealLock(current).outputKeyHex
+    let info
+    try {
+      info = await fetchNoteInfoByPubkey(
+        parsed.urlTemplate,
+        encodeCp1(hexToBytes(outputKeyHex))
+      )
+    } catch (err) {
+      if (err instanceof NoteSpentError) {
+        return {
+          consignment,
+          live: false,
+          reason:
+            'Its current note is already spent - this history is out of date, the seal has moved on (or was cashed out).'
+        }
+      }
+      if (err instanceof NoteUnknownError) {
+        return {
+          consignment,
+          live: false,
+          reason: 'The mint knows no note for this seal’s current state.'
+        }
+      }
+      throw err
+    }
+    if (info.maxWithdrawable !== parsed.amountMsat) {
+      return {
+        consignment,
+        live: false,
+        reason: `The mint holds ${info.maxWithdrawable} msat for this seal, not the ${parsed.amountMsat} msat its consignment says.`
+      }
+    }
+    const pinned = getTrustedMintPubkey(serverOf(parsed.urlTemplate))
+    const mintPubkey = pinned ?? info.mintPubkey
+    const certificateProblem = sealCertificateProblem(parsed, mintPubkey)
+    return {
+      consignment,
+      live: true,
+      amountMsat: info.maxWithdrawable,
+      mintPubkey,
+      mintPubkeyPinned: !!pinned,
+      transitions: parsed.states.length - 1,
+      certified: !certificateProblem,
+      certificateProblem
     }
   },
 
