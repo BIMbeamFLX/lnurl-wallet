@@ -232,10 +232,15 @@ const decodeSealState = (bytes: Uint8Array): SealState | null => {
 export const sealStateHash = (state: SealState): string =>
   bytesToHex(sha256(encodeSealState(state)))
 
+// `assetIdHex` is what the asset IS, when there is something it can be the
+// hash of - a picture seal passes its picture's own sha256 (see
+// picture.ts), so anyone holding the file can check it against the seal.
+// Left out, the id is 32 random bytes: unique, and about nothing.
 export const genesisState = (
   name: unknown,
   description: unknown,
-  ownerPubkeyHex: unknown
+  ownerPubkeyHex: unknown,
+  assetIdHex?: unknown
 ): SealState => {
   const trimmedName = String(name ?? '').trim()
   const trimmedDescription = String(description ?? '').trim()
@@ -245,8 +250,14 @@ export const genesisState = (
   if (!trimmedName) throw new Error('Name this asset first.')
   if (!isHex32(owner))
     throw new Error('Resolve the first owner’s pubkey first.')
+  const given = String(assetIdHex ?? '')
+    .trim()
+    .toLowerCase()
+  if (given && !isHex32(given)) {
+    throw new Error('An asset id is 32 bytes of hex.')
+  }
   return {
-    assetId: bytesToHex(schnorr.utils.randomSecretKey()),
+    assetId: given || bytesToHex(schnorr.utils.randomSecretKey()),
     name: trimmedName,
     description: trimmedDescription,
     stateIndex: 0,
