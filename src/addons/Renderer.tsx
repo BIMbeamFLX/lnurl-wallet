@@ -589,7 +589,12 @@ const AddonRenderer: Component<AddonRendererProps> = props => {
       case 'ImagePicker': {
         // same lazy-read rule as NotePicker above
         const readPicked = () => readBind(node.bind, vars) as PickedImage | null
+        // two quick picks read their files in whatever order the disk
+        // answers: only the latest pick may bind, or the control would
+        // show one file and the state hold another
+        let latest = 0
         const pick = async (input: HTMLInputElement) => {
+          const mine = ++latest
           const file = input.files?.[0]
           // a refused file must not linger in the control as if it had
           // been accepted - and whatever was bound before is gone either
@@ -609,6 +614,7 @@ const AddonRenderer: Component<AddonRendererProps> = props => {
           // own bytes decide what it is, never its name or the type the
           // browser reports for it
           const bytes = new Uint8Array(await file.arrayBuffer())
+          if (mine !== latest) return
           const format = imageFormatOf(bytes)
           const dataUrl = imageDataUrl(bytes)
           if (!format || !dataUrl) {

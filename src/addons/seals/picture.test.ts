@@ -13,6 +13,7 @@ import {
   pictureFromDataUrl,
   pictureHash,
   sealEnvelopeOf,
+  sealPictureHashProblem,
   sealPictureProblem,
   stripSealEnvelope
 } from './picture'
@@ -210,6 +211,81 @@ describe('where a PNG’s envelope goes', () => {
   })
 })
 
+describe('an envelope another tool wrote, or damaged', () => {
+  it('is read wherever it sits before the image data, and written back in the usual place', () => {
+    // right after SOI, ahead of the JFIF segment
+    const sealed = embedSealEnvelope(JPG, 'x')
+    const start = indexOf(sealed, KEYWORD) - 4
+    const segment = sealed.subarray(start, start + 4 + KEYWORD.length + 1)
+    const early = concatBytes(JPG.subarray(0, 2), segment, JPG.subarray(2))
+    expect(stripSealEnvelope(early)).toEqual({
+      format: 'jpeg',
+      picture: JPG,
+      envelope: 'x'
+    })
+    expect(embedSealEnvelope(early, 'x')).toEqual(sealed)
+
+    // a PNG's, right after IHDR instead of before IEND
+    const sealedPng = embedSealEnvelope(PNG, 'x')
+    const chunk = sealedPng.subarray(PNG.length - 12, sealedPng.length - 12)
+    const ihdrEnd = 8 + 12 + 13
+    const earlyPng = concatBytes(
+      PNG.subarray(0, ihdrEnd),
+      chunk,
+      PNG.subarray(ihdrEnd)
+    )
+    expect(stripSealEnvelope(earlyPng)!.envelope).toBe('x')
+    expect(stripSealEnvelope(earlyPng)!.picture).toEqual(PNG)
+    expect(embedSealEnvelope(earlyPng, 'x')).toEqual(sealedPng)
+  })
+
+  it('reads nothing out of a PNG envelope whose CRC is wrong, and still takes it out', () => {
+    const sealed = embedSealEnvelope(PNG, 'seal1example')
+    const damaged = sealed.slice()
+    damaged[damaged.length - 12 - 1]! ^= 1 // the envelope chunk's last CRC byte
+    const stripped = stripSealEnvelope(damaged)!
+    expect(stripped.envelope).toBeNull()
+    expect(stripped.picture).toEqual(PNG)
+    // a flipped byte in its text fails the same check
+    const edited = sealed.slice()
+    edited[indexOf(edited, KEYWORD) + KEYWORD.length]! ^= 1
+    expect(stripSealEnvelope(edited)!.envelope).toBeNull()
+    expect(pictureHash(edited)).toBe(pictureHash(PNG))
+  })
+
+  it('reads two envelopes in one JPG as one text, which is no seal', () => {
+    // a JPG cannot tell two envelopes from one long one split in two
+    const first = embedSealEnvelope(JPG, 'seal1first')
+    const start = indexOf(first, KEYWORD) - 4
+    const segment = first.subarray(start, start + 4 + KEYWORD.length + 10)
+    const twice = concatBytes(
+      first.subarray(0, start),
+      segment,
+      first.subarray(start)
+    )
+    const stripped = stripSealEnvelope(twice)!
+    expect(stripped.envelope).toBe('seal1firstseal1first')
+    expect(stripped.picture).toEqual(JPG)
+    expect(sealEnvelopeOf(twice)).toBeNull()
+  })
+
+  it('takes a comment that merely mentions the keyword for the file’s own', () => {
+    // not ours: the keyword is not at the start, followed by a NUL
+    const comment = ascii('about LNURLcash seal\0x')
+    const withComment = concatBytes(
+      JPG.subarray(0, 20),
+      Uint8Array.of(0xff, 0xfe, 0x00, comment.length + 2),
+      comment,
+      JPG.subarray(20)
+    )
+    expect(stripSealEnvelope(withComment)).toEqual({
+      format: 'jpeg',
+      picture: withComment,
+      envelope: null
+    })
+  })
+})
+
 describe('files that are not what they claim', () => {
   it('reads nothing out of anything but a JPG or PNG', () => {
     for (const bytes of [
@@ -363,6 +439,15 @@ describe('sealPictureProblem', () => {
     expect(sealPictureProblem([genesisState('Art', '', owner)], JPG)).toMatch(
       /not the picture/
     )
+  })
+
+  it('says the same from a hash already taken', () => {
+    expect(sealPictureHashProblem(states, pictureHash(JPG)!)).toBe('')
+    expect(sealPictureHashProblem(states, pictureHash(PNG)!)).toMatch(
+      /not the picture/
+    )
+    expect(sealPictureHashProblem(states, '')).toMatch(/not the picture/)
+    expect(sealPictureHashProblem([], pictureHash(JPG)!)).toMatch(/No seal/)
   })
 
   it('says what is missing', () => {

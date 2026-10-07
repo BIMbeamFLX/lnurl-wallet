@@ -314,9 +314,16 @@ describe('checkReport', () => {
     expect(report(answer(), history(1).consignment)).toEqual([])
     expect(report(null)).toEqual([])
     // "unspent" stopped being true when this very seal was transitioned
+    const moved = transitionOf(states)
+    expect(helper('checkReport')(consignment, answer(), moved)).toEqual([])
+    // an answer that already says it is gone is as true as it was
     expect(
-      helper('checkReport')(consignment, answer(), transitionOf(states))
-    ).toEqual([])
+      helper('checkReport')(
+        consignment,
+        answer({live: false, reason: 'Its current note is already spent.'}),
+        moved
+      )
+    ).toContain('✗ Its current note is already spent.')
   })
 })
 

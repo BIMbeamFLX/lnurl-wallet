@@ -7,11 +7,20 @@
 //
 // The consignment sits in an "envelope" that is not part of the picture:
 //   JPG - one or more COM (comment) segments, each starting with
-//         ENVELOPE_KEYWORD and a NUL, placed after the leading APPn
-//         segments; their texts are joined in file order (a segment holds
-//         under 64 KB, a long history needs more than one).
-//   PNG - one tEXt chunk with ENVELOPE_KEYWORD as its keyword, placed right
-//         before IEND.
+//         ENVELOPE_KEYWORD and a NUL; their texts are joined in file order
+//         (a segment holds under 64 KB, a long history needs more than one).
+//   PNG - one tEXt chunk with ENVELOPE_KEYWORD as its keyword.
+// WRITING puts a JPG's segments after the leading APPn segments and a PNG's
+// chunk right before IEND. READING takes an envelope wherever it sits among
+// the segments before a JPG's image data, or the chunks before a PNG's
+// IEND - so a file another tool wrote differently still reads, hashes to
+// the same picture, and is put back in the usual place on the next write.
+// What is not an envelope: anything after a JPG's first SOS, which is image
+// data and hashed as such. A PNG with two envelope chunks, or one whose CRC
+// is wrong, carries no readable envelope (both are still taken out for the
+// hash). A JPG cannot tell two envelopes from one long one split in two:
+// two texts joined are no consignment, so such a file reads as carrying
+// none.
 // Both are metadata every decoder skips: the picture shows exactly as it
 // did. Taking the envelope out again (stripSealEnvelope) gives back the
 // original file byte for byte, and THAT is what gets hashed - so the asset
@@ -265,8 +274,14 @@ export const stripSealEnvelope = (bytes: unknown): StrippedPicture | null => {
     if (!parsed) return null
     const kept: Uint8Array[] = [bytes.subarray(0, PNG_SIGNATURE.length)]
     const envelopes: string[] = []
+    let damaged = false
     for (const chunk of parsed.chunks) {
       if (isPngEnvelope(bytes, chunk)) {
+        // a chunk whose CRC does not match is one a PNG decoder would drop;
+        // it is taken out like any envelope, and read as nothing
+        damaged ||=
+          readU32(bytes, chunk.dataEnd) !==
+          crc32(bytes.subarray(chunk.start + 4, chunk.dataEnd))
         envelopes.push(
           textOf(
             bytes.subarray(
@@ -285,7 +300,7 @@ export const stripSealEnvelope = (bytes: unknown): StrippedPicture | null => {
       picture: concatBytes(...kept),
       // a PNG carries one envelope; two would be two claims about one
       // picture, and picking either would be a guess
-      envelope: envelopes.length === 1 ? envelopes[0]! : null
+      envelope: envelopes.length === 1 && !damaged ? envelopes[0]! : null
     }
   }
   return null
@@ -414,13 +429,24 @@ export const sealEnvelopeOf = (bytes: unknown): SealEnvelope | null =>
 // asset id is not a picture's hash (one issued without a picture) simply
 // never matches any file.
 export const sealPictureProblem = (states: unknown, bytes: unknown): string => {
+  const hash = pictureHash(bytes)
+  if (!hash && Array.isArray(states) && states[0]) {
+    return 'That file is not a JPG or PNG picture.'
+  }
+  return sealPictureHashProblem(states, hash ?? '')
+}
+
+// sealPictureProblem for a caller that already has the picture's hash
+// (pictureHash) - hashing megabytes is not something to repeat per check
+export const sealPictureHashProblem = (
+  states: unknown,
+  pictureHashHex: string
+): string => {
   const genesis = Array.isArray(states)
     ? (states[0] as SealState | undefined)
     : undefined
   if (!genesis) return 'No seal to compare the picture with.'
-  const hash = pictureHash(bytes)
-  if (!hash) return 'That file is not a JPG or PNG picture.'
-  return hash === genesis.assetId
+  return pictureHashHex === genesis.assetId
     ? ''
     : 'This is not the picture the seal was issued for - its bytes hash to something else. A screenshot, a resized or a recompressed copy is a different file.'
 }

@@ -25,7 +25,8 @@ import {
   pictureFromDataUrl,
   pictureHash,
   sealEnvelopeOf,
-  sealPictureProblem
+  sealPictureHashProblem,
+  type SealEnvelope
 } from './picture'
 import {generateKeypair} from '../taproot/taproot'
 
@@ -36,9 +37,10 @@ import {generateKeypair} from '../taproot/taproot'
 // history themselves rather than trusting whoever handed it to them)
 // adapted to bearer notes instead of real on-chain UTXOs. See seals.ts's
 // own top comment for the full design and its honest limitations -
-// particularly: transfers always go to a NAMED recipient (never
-// race-to-claim), and an unredeemed transition is a promise, not a
-// guarantee, until it actually lands at the mint.
+// particularly: a transfer goes to a NAMED recipient (race-to-claim only
+// where a holder deliberately makes a bearer picture, see below), and an
+// unredeemed transition is a promise, not a guarantee, until it actually
+// lands at the mint.
 //
 // Two independent things happen here, deliberately kept separate:
 //   ISSUE - create a brand new seal (note.lockToPubkey to a fresh
@@ -93,10 +95,42 @@ type GenesisPlan = {
 // `picture` is always what an ImagePicker bound (../imageData.ts's
 // PickedImage) - the file as a data URL - or null.
 
-const pictureHashOf = (picture: unknown): string => {
-  const bytes = pictureFromDataUrl(picture)
-  return (bytes && pictureHash(bytes)) || ''
+// What a picked picture comes down to: its bytes, the hash of the picture
+// in it, and the envelope it carries. A picture sits in state as a data URL
+// of megabytes, and every helper below is evaluated again on each keystroke
+// in any field its expression shares - decoding and hashing the file each
+// time costs a noticeable fraction of a second per key. So it is worked out
+// once per picture and kept for the last few, keyed by the data URL itself.
+type PictureInfo = {
+  bytes: Uint8Array
+  hashHex: string
+  envelope: SealEnvelope | null
 }
+
+const PICTURE_CACHE_SIZE = 4
+const pictureCache = new Map<string, PictureInfo | null>()
+
+const pictureInfo = (picture: unknown): PictureInfo | null => {
+  const dataUrl =
+    typeof picture === 'string'
+      ? picture
+      : (picture as {dataUrl?: unknown} | null)?.dataUrl
+  if (typeof dataUrl !== 'string') return null
+  const known = pictureCache.get(dataUrl)
+  if (known !== undefined) return known
+  const bytes = pictureFromDataUrl(dataUrl)
+  const hashHex = bytes ? pictureHash(bytes) : null
+  const info =
+    bytes && hashHex ? {bytes, hashHex, envelope: sealEnvelopeOf(bytes)} : null
+  if (pictureCache.size >= PICTURE_CACHE_SIZE) {
+    pictureCache.delete(pictureCache.keys().next().value!)
+  }
+  pictureCache.set(dataUrl, info)
+  return info
+}
+
+const pictureHashOf = (picture: unknown): string =>
+  pictureInfo(picture)?.hashHex ?? ''
 
 // with a picture picked, this is a picture seal: its asset id is the
 // picture's own hash rather than random bytes
@@ -133,7 +167,7 @@ const sealedPicture = (
   consignment: unknown,
   claimSecretKeyHex?: string
 ): Uint8Array | null => {
-  const bytes = pictureFromDataUrl(picture)
+  const bytes = pictureInfo(picture)?.bytes
   const text = String(consignment ?? '').trim()
   if (!bytes || !text) return null
   try {
@@ -162,7 +196,7 @@ const planMatchesPicture = (
 // "<asset name>.seal.jpg" - the seal's own name, cut down to what every
 // file system takes
 const pictureFileName = (picture: unknown, consignment: unknown): string => {
-  const bytes = pictureFromDataUrl(picture)
+  const bytes = pictureInfo(picture)?.bytes
   const format = bytes ? pictureFormatOf(bytes) : null
   const name = decodeSealConsignment(consignment)?.states[0]?.name ?? ''
   const slug = name
@@ -173,16 +207,14 @@ const pictureFileName = (picture: unknown, consignment: unknown): string => {
   return (slug || 'seal') + '.seal.' + extension
 }
 
-const envelopeOfPicture = (picture: unknown) => {
-  const bytes = pictureFromDataUrl(picture)
-  return bytes ? sealEnvelopeOf(bytes) : null
-}
+const envelopeOfPicture = (picture: unknown): SealEnvelope | null =>
+  pictureInfo(picture)?.envelope ?? null
 
 const consignmentOfPicture = (picture: unknown): string =>
   envelopeOfPicture(picture)?.consignment ?? ''
 
 const loadedPictureLine = (picture: unknown): string => {
-  if (!pictureFromDataUrl(picture)) return ''
+  if (!pictureInfo(picture)) return ''
   const envelope = envelopeOfPicture(picture)
   if (!envelope) return 'This picture carries no seal.'
   return envelope.claimSecretKeyHex
@@ -207,24 +239,26 @@ const pictureMatches = (
   consignmentInput: unknown,
   picture: unknown
 ): boolean => {
-  const bytes = pictureFromDataUrl(picture)
+  const info = pictureInfo(picture)
   const parsed = decodeSealConsignment(consignmentInput)
-  return !!bytes && !!parsed && !sealPictureProblem(parsed.states, bytes)
+  return (
+    !!info && !!parsed && !sealPictureHashProblem(parsed.states, info.hashHex)
+  )
 }
 
 const pictureMatchLine = (
   consignmentInput: unknown,
   picture: unknown
 ): string => {
-  const bytes = pictureFromDataUrl(picture)
+  const info = pictureInfo(picture)
   const parsed = decodeSealConsignment(consignmentInput)
-  if (!bytes || !parsed) return ''
-  const problem = sealPictureProblem(parsed.states, bytes)
+  if (!info || !parsed) return ''
+  const problem = sealPictureHashProblem(parsed.states, info.hashHex)
   return problem
     ? '✗ ' + problem
     : '✓ This file is the picture the seal was issued for - its sha256 is the seal’s asset id, ' +
         parsed.states[0]!.assetId +
-        '.'
+        '. That says this seal is about this picture, not that it is the only seal about it: anyone who has the file can issue another.'
 }
 
 const issuedConsignment = (
@@ -290,7 +324,7 @@ const issueUi: UiNode[] = [
           {
             type: 'Text',
             value:
-              'The seal’s asset id will be this file’s sha256, and the file itself can carry the seal’s consignment. Keep the file as it is: a resized, recompressed or screenshotted copy is a different picture.'
+              'The seal’s asset id will be this picture’s sha256 - of the file as it is, minus any seal it already carries - and the file itself can carry the seal’s consignment. Keep the file as it is: a resized, recompressed or screenshotted copy is a different picture.'
           }
         ]
       },
@@ -704,8 +738,11 @@ const checkReport = (
     return []
   }
   // a transition that has landed since spent the very note this answer was
-  // about - "unspent" would be a lie by now
-  if (transitionFollows(consignmentInput, transitionResult)) return []
+  // about - "unspent" would be a lie by now. An answer that already says
+  // the note is gone stays: it cannot have been made stale by that.
+  if (result.live && transitionFollows(consignmentInput, transitionResult)) {
+    return []
+  }
   const {host, mintPubkeyPinned: pinned} = result
   const lines = [`Asked ${host}.`]
   if (!result.live) {
@@ -1173,13 +1210,19 @@ const manageUi: UiNode[] = [
                   'Instead of naming the next owner, move the seal to a one-time key and put that key into the picture: whoever holds the file holds the seal, and the first to move it to a key of their own keeps it. Like cash - a copy of the file is a copy of the key.'
               },
               {
-                type: 'Button',
-                label: 'Make a one-time key',
-                onClick: {
-                  action: 'set',
-                  path: 'claimKey',
-                  value: {helper: 'newClaimKey', args: []}
-                }
+                type: 'Show',
+                when: {helper: 'not', args: [{var: 'claimKey'}]},
+                children: [
+                  {
+                    type: 'Button',
+                    label: 'Make a one-time key',
+                    onClick: {
+                      action: 'set',
+                      path: 'claimKey',
+                      value: {helper: 'newClaimKey', args: []}
+                    }
+                  }
+                ]
               },
               {
                 type: 'Show',
@@ -1390,7 +1433,7 @@ const docsUi: UiNode[] = [
   {
     type: 'Text',
     value:
-      'A picture is a file, not a look: the asset id is over its exact bytes. A screenshot, a resized or recompressed copy, or one a chat app stripped of its metadata is a different file - send the file itself. A bearer picture also carries the current owner’s key, so every copy of it can take the seal; the first one to move it keeps it.'
+      'A picture is a file, not a look: the asset id is over its exact bytes. A screenshot, a resized or recompressed copy, or one a chat app stripped of its metadata is a different file - send the file itself. A bearer picture also carries the current owner’s key, so every copy of it can take the seal; the first one to move it keeps it. And a picture can have more than one seal: anyone who has the file can issue another about it. What tells them apart is the mint and the owner of state #0.'
   },
   {
     type: 'Text',

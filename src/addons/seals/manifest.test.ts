@@ -207,11 +207,58 @@ describe('managing a seal out of its picture', () => {
     expect(helper('loadedPictureLine')(null)).toBe('')
   })
 
+  it('answers the same for a picture however often it is asked', () => {
+    // a picture is decoded and hashed once and remembered by its data URL -
+    // across more pictures than are remembered at a time, too
+    const pictures = [PNG, JPG].flatMap(bytes =>
+      ['a', 'b', 'c'].map(text =>
+        picked(
+          `${text}.${bytes === PNG ? 'png' : 'jpg'}`,
+          helper('issuedPicture')(
+            picked('x', bytes),
+            LOCKED,
+            helper('prepareGenesis')(
+              text,
+              '',
+              issuer.pubkeyHex,
+              picked('x', bytes)
+            )
+          )
+        )
+      )
+    )
+    const answers = () =>
+      pictures.map(loaded => [
+        helper('consignmentOfPicture')(loaded),
+        helper('loadedPictureLine')(loaded),
+        helper('pictureMatches')(
+          helper('consignmentOfPicture')(loaded),
+          loaded
+        ),
+        helper('pictureMatches')(consignment, loaded)
+      ])
+    const first = answers()
+    expect(answers()).toEqual(first)
+    expect(new Set(first.map(answer => answer[0])).size).toBe(6)
+    expect(first.every(answer => answer[2] === true)).toBe(true)
+    // only the PNG ones are the picture THIS consignment's seal is about
+    expect(first.map(answer => answer[3])).toEqual([
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ])
+  })
+
   it('says whether the loaded file is the seal’s own picture', () => {
     expect(helper('pictureMatches')(consignment, sealedPicture)).toBe(true)
     expect(helper('pictureMatches')(consignment, picture)).toBe(true)
     expect(helper('pictureMatchLine')(consignment, sealedPicture)).toMatch(
-      new RegExp(`^✓ .*${bytesToHex(sha256(PNG))}`)
+      new RegExp(
+        `^✓ .*${bytesToHex(sha256(PNG))}.*not that it is the only seal`
+      )
     )
     const other = picked('other.jpg', JPG)
     expect(helper('pictureMatches')(consignment, other)).toBe(false)

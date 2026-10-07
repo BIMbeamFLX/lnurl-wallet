@@ -117,6 +117,12 @@ component instead of reinventing rendering:
 New components are added here, in this file, when a real need shows up -
 never by an addon manifest.
 
+A picture picked with `ImagePicker` is read in the page and is ordinary addon
+state from then on: a verb the addon was granted can carry it wherever that
+verb goes, like any other state value. `IMAGE_MAX_BYTES` (8 MiB) is the
+picker's limit, not a property of a picture: `Image` shows a larger data URL
+if an addon builds one.
+
 ### `bind` inside a `For`
 
 `bind="item.count"` on an `Input` nested inside a `For each={{var: "tiers"}}`

@@ -28,6 +28,7 @@ import {ck1Pubkey} from '../src/lib/signature'
 import {bearerNoteIdOfHash, bearerNoteIdOfPreimage} from '../src/lib/spend'
 import {
   crc32,
+  embedSealEnvelope,
   sealEnvelopeOf,
   stripSealEnvelope
 } from '../src/addons/seals/picture'
@@ -94,6 +95,15 @@ const makePng = (width: number, height: number): Uint8Array => {
 }
 const PICTURE = makePng(96, 128)
 const PICTURE_HASH = bytesToHex(sha256(PICTURE))
+const MINT_HOST = new URL(MINT).host
+
+// a real 8x8 JFIF JPG, written by Pillow
+const JPG = new Uint8Array(
+  Buffer.from(
+    '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLSwzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk//2wBDAQ4ODhMREyYVFSZPNS01T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0//wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwCrpHhn7v7v9KKKKITdisux9f2C1P/Z',
+    'base64'
+  )
+)
 
 // cross-origin from the dev server, so the browser needs CORS headers to
 // hand the body to the wallet
@@ -314,8 +324,18 @@ test('a picture seal: issued, read out of its file, handed on as a bearer pictur
   await expect(
     page.getByText(/^✓ This file is the picture the seal was issued for/)
   ).toBeVisible()
+  // the mint it names is on screen before anything is asked of it
+  await expect(
+    page.getByText(`This consignment says the seal lives at ${MINT_HOST}.`, {
+      exact: false
+    })
+  ).toBeVisible()
   await page.getByRole('button', {name: 'Check at the mint'}).click()
-  await expect(page.getByText(/^✓ Live at the mint/)).toBeVisible()
+  await expect(page.getByText(`Asked ${MINT_HOST}.`)).toBeVisible()
+  // this wallet holds a key for that mint, pinned when its note arrived
+  await expect(
+    page.getByText(new RegExp(`^✓ Live at ${MINT_HOST.replace(/\./g, '\\.')}`))
+  ).toBeVisible()
   await expect(page.getByText(/^Never transferred/)).toBeVisible()
 
   // ---- hand it on as a bearer picture
@@ -326,10 +346,22 @@ test('a picture seal: issued, read out of its file, handed on as a bearer pictur
   await expect(
     page.getByText(/^One-time secret key: [0-9a-f]{64}$/)
   ).toBeVisible()
+  // one key per page: a second would replace the only key to a seal that
+  // is about to move to the first
+  await expect(
+    page.getByRole('button', {name: 'Make a one-time key'})
+  ).toHaveCount(0)
   await page
     .getByRole('button', {name: 'Move the seal to the one-time key'})
     .click()
   await expect(page.getByText('✓ Transitioned')).toBeVisible()
+  // the seal has moved: nothing on this page can move it again, and the
+  // check made before it is no longer shown as current
+  await expect(page.getByLabel('Your secret key (32-byte hex)')).toHaveCount(0)
+  await expect(
+    page.getByRole('button', {name: 'Move the seal to the one-time key'})
+  ).toHaveCount(0)
+  await expect(page.getByText(`Asked ${MINT_HOST}.`)).toHaveCount(0)
   await expect(
     page.getByText(/^✓ The mint certified this transition/)
   ).toBeVisible()
@@ -396,7 +428,7 @@ test('a picture seal: issued, read out of its file, handed on as a bearer pictur
   // ---- what the mint says about each file now
   await manage(page, claimed.bytes)
   await page.getByRole('button', {name: 'Check at the mint'}).click()
-  await expect(page.getByText(/^✓ Live at the mint/)).toBeVisible()
+  await expect(page.getByText(/^✓ Live at mint-seals/)).toBeVisible()
   await expect(
     page.getByText(/^✓ Every one of its 2 transition\(s\) is certified/)
   ).toBeVisible()
@@ -454,6 +486,42 @@ test('a picture that is not the seal’s own is told apart from the one that is'
   await expect(
     page.getByRole('button', {name: 'Make a one-time key'})
   ).toHaveCount(0)
+
+  // a JPG that carries this seal: the browser still shows it as the
+  // picture it is, the seal is read out of it - and it is not the PNG the
+  // seal was issued for
+  await page.getByLabel(/^Load a picture that carries a seal/).setInputFiles({
+    name: 'card.jpg',
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from(embedSealEnvelope(JPG, consignment))
+  })
+  await expect(
+    page.getByText('This picture carries a seal’s consignment.')
+  ).toBeVisible()
+  const shown = page.locator('img.addon-image')
+  await expect(shown).toHaveAttribute('src', /^data:image\/jpeg;base64,/)
+  expect(
+    await shown.evaluate(img => {
+      const image = img as HTMLImageElement
+      return [image.complete, image.naturalWidth, image.naturalHeight]
+    })
+  ).toEqual([true, 8, 8])
+  await expect(
+    page.getByText(/^✗ This is not the picture the seal/)
+  ).toBeVisible()
+
+  // a file over the picker's limit is refused, whatever it is
+  const tooLarge = Buffer.alloc(8 * 1024 * 1024 + 1)
+  tooLarge.set(PICTURE)
+  await page.getByLabel(/^Load a picture that carries a seal/).setInputFiles({
+    name: 'huge.png',
+    mimeType: 'image/png',
+    buffer: tooLarge
+  })
+  await expect(
+    page.getByText('That picture is too large - 8 MB at most.')
+  ).toBeVisible()
+  await expect(page.locator('img.addon-image')).toHaveCount(0)
 
   // something that is no picture at all is refused at the picker
   await page.getByLabel(/^Load a picture that carries a seal/).setInputFiles({
