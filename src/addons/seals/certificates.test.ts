@@ -129,6 +129,46 @@ describe('seal consignment: certificates', () => {
     expect(decodeSealConsignment(plain)!.certificates).toEqual([])
   })
 
+  it('encodes and decodes what the encoder before certificates wrote', () => {
+    // these two strings came out of seals.ts as it was before certificates
+    // existed (lnurl-wallet ed95b16), for exactly these states - so "byte
+    // for byte what it was" is checked against the old bytes themselves,
+    // not against this encoder's own output
+    const pk = (fill: number): string =>
+      bytesToHex(schnorr.getPublicKey(new Uint8Array(32).fill(fill)))
+    expect([pk(1), pk(2), pk(3)]).toEqual([
+      '1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f',
+      '4d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766',
+      '531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe337'
+    ])
+    const genesis: SealState = {
+      assetId: '11'.repeat(32),
+      name: 'Art #1',
+      description: 'one of one',
+      stateIndex: 0,
+      ownerPubkeyHex: pk(1),
+      prevStateHash: ''
+    }
+    const first = nextState(genesis, pk(2))
+    const second = nextState(first, pk(3))
+    const one =
+      'seal1qqqqqqqpxyksqqq6dp68gurn8ghj7mtfde6zuetcv9khqmr99e3k7mf0wuqg7nzw24fyccmpwd5z7um9v9kz7um5v96x2tmkxqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zqqxg9e8ggprxyqq5mmwv5sx7e3qdahx2qqqqqqphpx92ea3yezqn9wna4d2hgzkt4c7rq6xqjqel7wp0a0f6hws0rcqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqm7lqmc'
+    const three =
+      'seal1qqqqqqqpxyksqqq6dp68gurn8ghj7mtfde6zuetcv9khqmr99e3k7mf0wuqg7nzw24fyccmpwd5z7um9v9kz7um5v96x2tmkxqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zqqxg9e8ggprxyqq5mmwv5sx7e3qdahx2qqqqqqphpx92ea3yezqn9wna4d2hgzkt4c7rq6xqjqel7wp0a0f6hws0rcqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg7nzw24fyccmpwd5z7um9v9kz7um5v96x2tmkxqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zqqxg9e8ggprxyqq5mmwv5sx7e3qdahx2qqqqqq56jmv6ympqvk2n0f2awweqz4y63weatvq4j2zxd6vg5d8y4xswenytyyyt8w4gk5k30c0fq8wvhc4hkk3hedkg99rxd5d7g8j0vzlwvqg7nzw24fyccmpwd5z7um9v9kz7um5v96x2tmkxqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zqqxg9e8ggprxyqq5mmwv5sx7e3qdahx2qqqqqp9x8lxq6qng5payu33xv38epn6eraxeq79xl56gnput0daev07xdlsw0dvxr7zwwc02a0yaec94gtfepw5ulyjtexu3kxgaeh49hrn454jhngd'
+    expect(encodeSealConsignment(LOCKED, [genesis])).toBe(one)
+    expect(encodeSealConsignment(LOCKED, [genesis, first, second])).toBe(three)
+    expect(decodeSealConsignment(one)).toEqual({
+      ...LOCKED,
+      states: [genesis],
+      certificates: []
+    })
+    expect(decodeSealConsignment(three)!.states).toEqual([
+      genesis,
+      first,
+      second
+    ])
+  })
+
   it('round-trips one certificate per transition', () => {
     const {states, certificates} = history(3, mint.priv)
     const consignment = encodeSealConsignment(LOCKED, states, certificates)
@@ -290,8 +330,8 @@ describe('sealCertificateProblem', () => {
   })
 
   it('rejects a fork: only one note was ever certified as the next one', () => {
-    // an owner who split the note and locked both halves to two different
-    // next states gets no certificate from the mint for either
+    // an owner who also locked a note to a SECOND next state has, at best,
+    // the mint's certificate for the first - and it does not fit the second
     const {states, certificates} = history(1, mint.priv)
     const fork = nextState(states[0]!, ownerKey())
     expect(keyOf(fork)).not.toBe(keyOf(states[1]!))

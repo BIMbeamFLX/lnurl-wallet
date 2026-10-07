@@ -19,6 +19,7 @@ import {
   verifyRotationCertificate,
   NoteSpentError,
   NoteUnknownError,
+  serviceOriginOf,
   noteSignature,
   settleNote,
   withNewK1,
@@ -54,7 +55,7 @@ import {
   sealChainProblem,
   type SealState
 } from './seals/seals'
-import {getTrustedMintPubkey} from '../trustedMints'
+import {getTrustedMintPubkey, trustedMints} from '../trustedMints'
 import {fetchAddressSummary, fetchAddressUtxos} from './electrs/electrsClient'
 
 // the subset of WalletContext/DeviceContext a verb is allowed to touch -
@@ -431,17 +432,25 @@ export const VERBS: Record<string, VerbHandler> = {
       urlTemplate,
       encodeCp1(hexToBytes(currentOutputKeyHex))
     )
+    // A consignment states its note's value, and the next one will state
+    // what the mint reports. If the two already disagree the consignment is
+    // wrong about this seal - found out now, while nothing has moved, not
+    // after a rotate that cannot be taken back.
+    if (
+      Number.isFinite(amountMsat) &&
+      amountMsat > 0 &&
+      info.maxWithdrawable !== amountMsat
+    ) {
+      throw new Error(
+        `The mint holds ${info.maxWithdrawable} msat for this seal, not the ${amountMsat} msat its consignment says. Nothing was moved - check the consignment at the mint first.`
+      )
+    }
     const next = nextState(currentState, nextOwnerPubkeyHex)
     const nextOutputKeyHex = planSealLock(next).outputKeyHex
+    const target = encodeCp1(hexToBytes(nextOutputKeyHex))
     let rotation: string | undefined
     try {
-      rotation = (
-        await rotateNoteWithHash(
-          info.callback,
-          cw1,
-          encodeCp1(hexToBytes(nextOutputKeyHex))
-        )
-      ).rotation
+      rotation = (await rotateNoteWithHash(info.callback, cw1, target)).rotation
     } catch (err) {
       if (err instanceof AmbiguousMintError) {
         throw new Error(
@@ -450,6 +459,21 @@ export const VERBS: Record<string, VerbHandler> = {
       }
       throw err
     }
+    // The rotate has landed. Its certificate exists nowhere but in the
+    // mint's answer to this very request, so an answer without one is asked
+    // for once more before the step goes on uncertified for good: LUD-25's
+    // Retrying a mutation replays the same result, now with `r` if the mint
+    // could not sign a moment ago. Whatever this second answer is - an
+    // error from a mint that replays nothing, a timeout - changes nothing
+    // about a transition that already happened.
+    if (!rotation) {
+      try {
+        rotation = (await rotateNoteWithHash(info.callback, cw1, target))
+          .rotation
+      } catch {
+        // see above
+      }
+    }
     // the mint's own cr1 for this very rotate (see lib/signature.ts) - what
     // the next consignment carries so its holder can tell this transition
     // from a note minted on the side. Only handed on if it really is this
@@ -457,7 +481,7 @@ export const VERBS: Record<string, VerbHandler> = {
     // wallet pinned for the mint, else the one the lookup above reported.
     // The transition itself has landed either way.
     const mintPubkey =
-      getTrustedMintPubkey(serverOf(urlTemplate)) ?? info.mintPubkey
+      getTrustedMintPubkey(serviceOriginOf(urlTemplate)) ?? info.mintPubkey
     const certified =
       !!rotation &&
       verifyRotationCertificate(
@@ -471,18 +495,27 @@ export const VERBS: Record<string, VerbHandler> = {
       urlTemplate,
       amountMsat: info.maxWithdrawable,
       state: next,
-      certificate: certified ? rotation : null
+      certificate: certified ? rotation : null,
+      certificateProblem: certified ? '' : rotation ? 'invalid' : 'missing'
     }
   },
 
-  // The Seals addon's one online question, asked of the seal's own mint:
-  // is the note its CURRENT state locks to still there, unspent, and worth
-  // what the consignment says? Looked up by its public output key alone
-  // (`?p=cp1<Q>`), so nothing here could ever spend it. The same answer
-  // names the mint's signing key, which every transition's certificate is
-  // then checked against (sealCertificateProblem) - against the key this
-  // wallet already pinned for that mint, when it has one. Never throws for
-  // a seal that is simply gone: that is an answer, not an error.
+  // The Seals addon's one online question, asked of the mint a consignment
+  // names: is the note its CURRENT state locks to still there, unspent, and
+  // worth what the consignment says? Looked up by its public output key
+  // alone (`?p=cp1<Q>`), so nothing here could ever spend it.
+  //
+  // Who is being asked is part of the answer. A consignment's own URL is
+  // signed by nobody, and whoever runs the server it points at can answer
+  // "unspent" and name any signing key - the real mint's included, which is
+  // public. So the result always carries the host, whether this wallet has
+  // a key pinned for it, and whether the key it named is one this wallet
+  // knows as ANOTHER mint's. The certificates are checked against the
+  // pinned key when there is one - also for a seal whose note is gone,
+  // where that key is the only one to be had - and otherwise against the
+  // key the server named, which the addon then reports as that server's
+  // word and nothing more. Never throws for a seal that is simply gone:
+  // that is an answer, not an error.
   'seal.check': async args => {
     // echoed back so the addon only ever shows this answer under the very
     // consignment it was asked about
@@ -491,6 +524,32 @@ export const VERBS: Record<string, VerbHandler> = {
     if (!parsed) throw new Error('Not a valid seal consignment.')
     const chainProblem = sealChainProblem(parsed.states)
     if (chainProblem) throw new Error(chainProblem)
+    const origin = serviceOriginOf(parsed.urlTemplate)
+    const pinned = getTrustedMintPubkey(origin)
+    const answer = {
+      consignment,
+      host: serverOf(parsed.urlTemplate),
+      transitions: parsed.states.length - 1,
+      mintPubkeyPinned: !!pinned
+    }
+    // against `mintPubkey`, or not at all when there is no key to be had
+    const certificates = (mintPubkey: string | null) => {
+      const problem = mintPubkey
+        ? sealCertificateProblem(parsed, mintPubkey)
+        : null
+      return {
+        mintPubkey,
+        certified: problem === null ? null : !problem,
+        certificateProblem: problem ?? ''
+      }
+    }
+    const gone = (reason: string) => ({
+      ...answer,
+      live: false,
+      reason,
+      keyKnownAs: null,
+      ...certificates(pinned)
+    })
     const current = parsed.states[parsed.states.length - 1]!
     const outputKeyHex = planSealLock(current).outputKeyHex
     let info
@@ -501,41 +560,36 @@ export const VERBS: Record<string, VerbHandler> = {
       )
     } catch (err) {
       if (err instanceof NoteSpentError) {
-        return {
-          consignment,
-          live: false,
-          reason:
-            'Its current note is already spent - this history is out of date, the seal has moved on (or was cashed out).'
-        }
+        return gone(
+          'Its current note is already spent - this history is out of date, the seal has moved on (or was cashed out).'
+        )
       }
       if (err instanceof NoteUnknownError) {
-        return {
-          consignment,
-          live: false,
-          reason: 'The mint knows no note for this seal’s current state.'
-        }
+        return gone('The mint knows no note for this seal’s current state.')
       }
       throw err
     }
     if (info.maxWithdrawable !== parsed.amountMsat) {
-      return {
-        consignment,
-        live: false,
-        reason: `The mint holds ${info.maxWithdrawable} msat for this seal, not the ${parsed.amountMsat} msat its consignment says.`
-      }
+      return gone(
+        `The mint holds ${info.maxWithdrawable} msat for this seal, not the ${parsed.amountMsat} msat its consignment says.`
+      )
     }
-    const pinned = getTrustedMintPubkey(serverOf(parsed.urlTemplate))
-    const mintPubkey = pinned ?? info.mintPubkey
-    const certificateProblem = sealCertificateProblem(parsed, mintPubkey)
+    // a server this wallet has no pin for, naming a key it HAS pinned - for
+    // some other mint
+    const keyKnownAs = pinned
+      ? null
+      : (trustedMints().find(
+          mint =>
+            !mint.unconfirmed &&
+            mint.mintPubkey.toLowerCase() === info.mintPubkey.toLowerCase() &&
+            mint.server !== origin
+        )?.server ?? null)
     return {
-      consignment,
+      ...answer,
       live: true,
       amountMsat: info.maxWithdrawable,
-      mintPubkey,
-      mintPubkeyPinned: !!pinned,
-      transitions: parsed.states.length - 1,
-      certified: !certificateProblem,
-      certificateProblem
+      keyKnownAs: keyKnownAs ? serverOf(keyKnownAs) : null,
+      ...certificates(pinned ?? info.mintPubkey)
     }
   },
 
