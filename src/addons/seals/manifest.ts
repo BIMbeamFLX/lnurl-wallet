@@ -466,8 +466,11 @@ const checkReport = (
     return []
   }
   // a transition that has landed since spent the very note this answer was
-  // about - "unspent" would be a lie by now
-  if (transitionFollows(consignmentInput, transitionResult)) return []
+  // about - "unspent" would be a lie by now. An answer that already says
+  // the note is gone stays: it cannot have been made stale by that.
+  if (result.live && transitionFollows(consignmentInput, transitionResult)) {
+    return []
+  }
   const {host, mintPubkeyPinned: pinned} = result
   const lines = [`Asked ${host}.`]
   if (!result.live) {
