@@ -160,7 +160,8 @@ describe('seal consignment: certificates', () => {
     expect(decodeSealConsignment(one)).toEqual({
       ...LOCKED,
       states: [genesis],
-      certificates: []
+      certificates: [],
+      spends: []
     })
     expect(decodeSealConsignment(three)!.states).toEqual([
       genesis,

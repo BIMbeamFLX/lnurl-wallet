@@ -139,6 +139,35 @@ describe('nextConsignment', () => {
     ).toBe('')
   })
 
+  it('carries every owner’s spend signature on and adds the new one', () => {
+    const {states, certificates} = history(2)
+    const carried = [
+      {stateIndex: 1, signatureHex: '11'.repeat(64)},
+      {stateIndex: 2, signatureHex: '22'.repeat(64)}
+    ]
+    const consignment = encodeSealConsignment(
+      LOCKED,
+      states,
+      certificates,
+      carried
+    )!
+    const spend = '33'.repeat(64)
+    const next = helper('nextConsignment')(
+      consignment,
+      transitionOf(states, {spend})
+    )
+    expect(decodeSealConsignment(next)!.spends).toEqual([
+      ...carried,
+      {stateIndex: 3, signatureHex: spend}
+    ])
+    // and a result from before spends leaves the carried ones as they were
+    expect(
+      decodeSealConsignment(
+        helper('nextConsignment')(consignment, transitionOf(states))
+      )!.spends
+    ).toEqual(carried)
+  })
+
   it('goes on without a certificate the mint did not give', () => {
     const {states, consignment} = history(1)
     const next = helper('nextConsignment')(
@@ -190,7 +219,9 @@ describe('transitionCertificateLine', () => {
       helper('transitionCertificateLine')(
         transitionOf(states, {certificate: null, certificateProblem: 'missing'})
       )
-    ).toMatch(/did not certify this transition/)
+    ).toMatch(
+      /did not certify this transition.*carries your signature for this step instead.*online only/
+    )
     expect(
       helper('transitionCertificateLine')(
         transitionOf(states, {certificate: null, certificateProblem: 'invalid'})
@@ -307,6 +338,56 @@ describe('checkReport', () => {
     )
     expect(report(answer({transitions: 0}))).toContainEqual(
       expect.stringMatching(/^Never transferred/)
+    )
+  })
+
+  it('reports what the mint said when each transition was put to it again', () => {
+    const uncertified = {
+      certified: false,
+      certificateProblem: 'State 1: the mint did not certify this transition.'
+    }
+    // confirmed by a mint this wallet knows,
+    expect(report(answer({...uncertified, confirmed: true}))).toEqual([
+      `Asked ${HOST}.`,
+      `✓ Live at ${HOST} - its current note is unspent and worth ${AMOUNT_MSAT} msat.`,
+      `✓ ${HOST} confirmed every one of its 2 transition(s) just now: each note is the only one its predecessor was burned into.`,
+      expect.stringMatching(
+        /^That is its answer right now, not a signature.*cannot be checked again offline/
+      ),
+      `Key: ${mintPub}`
+    ])
+    // by one it does not: that server's word, and no check mark
+    const unpinned = report(
+      answer({...uncertified, confirmed: true, mintPubkeyPinned: false})
+    )
+    expect(unpinned.filter(line => line.startsWith('✓'))).toEqual([])
+    expect(unpinned[2]).toBe(
+      `${HOST} says every one of its 2 transition(s) happened as this history states.`
+    )
+    // contradicted,
+    const refusal =
+      'State 2: the mint does not confirm that the note before it was burned into this one.'
+    expect(
+      report(
+        answer({...uncertified, confirmed: false, confirmProblem: refusal})
+      )
+    ).toContain(`✗ ${refusal}`)
+    // or not asked at all, and why
+    const unasked = report(
+      answer({
+        ...uncertified,
+        confirmed: null,
+        confirmProblem:
+          'State 1: the consignment carries no signature of the owner before it.'
+      })
+    )
+    expect(unasked).toContain(
+      '✗ Not fully certified - State 1: the mint did not certify this transition.'
+    )
+    expect(unasked).toContainEqual(
+      expect.stringMatching(
+        /^Its transitions could not be put to the mint again either - State 1: the consignment carries no signature/
+      )
     )
   })
 

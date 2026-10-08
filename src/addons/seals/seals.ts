@@ -48,17 +48,27 @@
 //   takes. The chain alone only proves the presented history is
 //   internally self-consistent: anyone who knows a state can lock a note of
 //   their own to a made-up next state, and an owner can split the note and
-//   lock both halves to two different ones. So a consignment also carries
-//   the mint's own rotation certificate (cr1, see lib/signature.ts) for
-//   every transition: its signature that THIS state's note was burned into
-//   exactly THAT state's note. A note is burned once, so a fully certified
-//   history has no fork and no look-alike in it - checked offline
-//   (sealCertificateProblem), against nothing but the mint's signing key.
-//   A consignment from a mint that issues none stays valid, just
-//   uncertified. Two things a certified history still does not say: that
-//   its LAST note is unspent (only the mint knows), and who issued the
-//   seal - certificates start at the first transition, so the genesis is
-//   vouched for by nothing but its own owner key and the mint it sits at.
+//   lock both halves to two different ones. So a consignment also carries,
+//   for every transition, what lets its holder find out that THIS state's
+//   note was burned into exactly THAT state's note. A note is burned once,
+//   so a history where that holds at every step has no fork and no
+//   look-alike in it:
+//
+//   - the signature its previous owner spent with (sealSpendProblem). With
+//     it anyone can put the very same rotate to the mint again, and every
+//     LUD-25 mint answers an exact retry of a completed rotate with its
+//     original success and anything else with "already spent" (25.md's
+//     Retries) - see verbs.ts's seal.check. Online only, and the answer is
+//     the mint's word at that moment, signed by nobody.
+//   - the mint's own rotation certificate (cr1, see lib/signature.ts), from
+//     a mint that issues them: the same statement as a signature, checked
+//     offline (sealCertificateProblem) against nothing but the mint's key.
+//
+//   A consignment with neither stays valid, just unchecked. Two things no
+//   history says: that its LAST note is unspent (only the mint knows), and
+//   who issued the seal - both proofs start at the first transition, so the
+//   genesis is vouched for by nothing but its own owner key and the mint it
+//   sits at.
 //
 //   Encoded the same way this kit encodes every other wire value it
 //   invents (see src/lib/recoverableNotes.ts's own top comment) - a single
@@ -98,6 +108,7 @@ import {
   MINT_PUBKEY_PATTERN,
   verifyRotationCertificate
 } from '../../lib/signature'
+import {scriptPathSighash, spendDomainOf} from '../../lib/spend'
 import {
   compileLeaf,
   NUMS_INTERNAL_KEY_HEX,
@@ -318,13 +329,40 @@ export const planSealLock = (state: SealState): SealLock => {
   return {outputKeyHex}
 }
 
-// The current owner's own redemption witness for THIS state's leaf -
-// reveals the state (the hashlock preimage) and signs with the owner's
-// own key. This alone is already a complete, ordinary cw1 k1 - paste it
-// into any receive flow to cash out the underlying value instead of
-// transitioning it. See verbs.ts's own seal.transition for rotating it
-// into a NEW state instead.
-export const redeemCurrentStateCw1 = (
+// what every seal spend claims for its time: nothing is timelocked
+const SPEND_LOCKTIME = 0
+const SPEND_SEQUENCE = 0xfffffffe
+
+const isSignatureHex = (v: unknown): v is string =>
+  /^[0-9a-f]{128}$/i.test(String(v ?? ''))
+
+// The cw1 that spends `state`'s note, from the state and its owner's
+// signature alone: script, control block and preimage all follow from the
+// state, so the 64 signature bytes are the only part of a spend a
+// consignment has to carry to put it to the mint again (see SealSpend).
+export const sealSpendCw1 = (
+  state: SealState,
+  signatureHex: unknown
+): string => {
+  if (!isSignatureHex(signatureHex)) {
+    throw new Error('Not a valid 64-byte signature.')
+  }
+  const leaf = leafFor(state)
+  const [proof] = scriptPathProofs(hexToBytes(NUMS_INTERNAL_KEY_HEX), [leaf])
+  if (!proof) throw new Error('Internal error: no proof for this state.')
+  return encodeCw1({
+    locktime: SPEND_LOCKTIME,
+    sequence: SPEND_SEQUENCE,
+    script: proof.script,
+    controlBlock: proof.controlBlock,
+    witness: [hexToBytes(signatureHex.toLowerCase()), encodeSealState(state)]
+  })
+}
+
+// The current owner's own signature that spends THIS state's note at
+// `mint` - bound to that mint and to nothing else, least of all to where
+// the note goes next (see lib/spend.ts).
+export const signCurrentState = (
   state: SealState,
   ownerSecretKeyHex: unknown,
   mint: unknown
@@ -343,25 +381,31 @@ export const redeemCurrentStateCw1 = (
     )
   }
   const leaf = leafFor(state)
-  const [proof] = scriptPathProofs(hexToBytes(NUMS_INTERNAL_KEY_HEX), [leaf])
-  if (!proof) throw new Error('Internal error: no proof for this state.')
-  const sig = signScriptPathSpend(
-    secret,
-    NUMS_INTERNAL_KEY_HEX,
-    [leaf],
-    leaf,
-    mint,
-    0,
-    0xfffffffe
+  return bytesToHex(
+    signScriptPathSpend(
+      secret,
+      NUMS_INTERNAL_KEY_HEX,
+      [leaf],
+      leaf,
+      mint,
+      SPEND_LOCKTIME,
+      SPEND_SEQUENCE
+    )
   )
-  return encodeCw1({
-    locktime: 0,
-    sequence: 0xfffffffe,
-    script: proof.script,
-    controlBlock: proof.controlBlock,
-    witness: [sig, encodeSealState(state)]
-  })
 }
+
+// The current owner's own redemption witness for THIS state's leaf -
+// reveals the state (the hashlock preimage) and signs with the owner's
+// own key. This alone is already a complete, ordinary cw1 k1 - paste it
+// into any receive flow to cash out the underlying value instead of
+// transitioning it. See verbs.ts's own seal.transition for rotating it
+// into a NEW state instead.
+export const redeemCurrentStateCw1 = (
+  state: SealState,
+  ownerSecretKeyHex: unknown,
+  mint: unknown
+): string =>
+  sealSpendCw1(state, signCurrentState(state, ownerSecretKeyHex, mint))
 
 // '' when the WHOLE chain is self-consistent, else the reason it isn't -
 // the real "client-side validation" this whole design is built around.
@@ -405,6 +449,13 @@ export const sealChainProblem = (states: unknown): string => {
 // `stateIndex`'s (so 1 for the first transfer - genesis itself has none).
 export type SealCertificate = {stateIndex: number; cr1: string}
 
+// The signature one transition's previous owner spent with: what the mint
+// was shown when state `stateIndex - 1`'s note was burned into state
+// `stateIndex`'s (so 1 for the first transfer, like a certificate). Never
+// one for the CURRENT state: that note is still to be spent, and its
+// owner's signature does not say where to.
+export type SealSpend = {stateIndex: number; signatureHex: string}
+
 export type SealConsignment = {
   urlTemplate: string
   amountMsat: number
@@ -413,6 +464,8 @@ export type SealConsignment = {
   // at most one per transition, in no particular order; empty for a
   // consignment nobody certified
   certificates: SealCertificate[]
+  // likewise, at most one per transition
+  spends: SealSpend[]
 }
 
 // A certificate's own domain tag - what tells it apart from a state in the
@@ -459,17 +512,47 @@ const decodeSealCertificate = (
   }
 }
 
+// A spend's own domain tag, followed by the state index it leads into and
+// the previous owner's 64 signature bytes - everything else of that spend
+// is rebuilt from the state itself (sealSpendCw1).
+const SPEND_TAG = utf8ToBytes('LNURLcash/seal/spend/v0')
+
+const encodeSealSpend = (spend: SealSpend): Uint8Array => {
+  if (!isSignatureHex(spend?.signatureHex)) {
+    throw new Error('A spend is not a 64-byte signature.')
+  }
+  if (!isPositiveInt(spend.stateIndex)) {
+    throw new Error('A spend names no transition.')
+  }
+  return concatBytes(
+    SPEND_TAG,
+    encodeStateIndex(spend.stateIndex),
+    hexToBytes(spend.signatureHex.toLowerCase())
+  )
+}
+
+const decodeSealSpend = (bytes: Uint8Array): SealSpend | null => {
+  const tagLength = SPEND_TAG.length
+  if (bytes.length !== tagLength + 4 + 64) return null
+  if (!bytesEqual(bytes.slice(0, tagLength), SPEND_TAG)) return null
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const stateIndex = view.getUint32(tagLength, false)
+  if (stateIndex === 0) return null
+  return {stateIndex, signatureHex: bytesToHex(bytes.slice(tagLength + 4))}
+}
+
 // Wire layout, all integers big-endian (mirrors recoverableNotes.ts's own
 // cw1 - a header, then a run of length-prefixed parts):
 //   u64 amountMsat
 //   || u16 len(urlTemplate) || urlTemplate (utf8)
 //   || (u16 len(state_i) || encodeSealState(state_i))*   [genesis..current]
 //   || (u16 len(cert) || CERTIFICATE_TAG || u32 stateIndex || sig(65))*
+//   || (u16 len(spend) || SPEND_TAG || u32 stateIndex || sig(64))*
 //
-// Certificates come after every state and are optional, so a consignment
-// with none is byte-for-byte what it was before they existed. The other
-// direction does not hold: a wallet from before certificates reads a
-// certificate as a malformed state and rejects the whole consignment.
+// Certificates and spends come after every state and are optional, so a
+// consignment with neither is byte-for-byte what it was before they
+// existed. The other direction does not hold: a wallet from before them
+// reads either as a malformed state and rejects the whole consignment.
 //
 // u64, not u32 like cw1's own locktime/sequence fields: amountMsat isn't
 // Bitcoin-consensus-bounded the way those are, and u32's ~4.29 billion
@@ -496,7 +579,8 @@ const encodeAmountMsat = (amountMsat: number): Uint8Array => {
 export const encodeSealConsignment = (
   lockedNote: unknown,
   states: unknown,
-  certificates?: unknown
+  certificates?: unknown,
+  spends?: unknown
 ): string | null => {
   const locked = lockedNote as {urlTemplate: string; amountMsat: number} | null
   if (!locked || !Array.isArray(states) || states.length === 0) return null
@@ -540,7 +624,20 @@ export const encodeSealConsignment = (
       seen.add(index)
       return part
     })
-    const parts = [...stateParts, ...certificateParts]
+    // the same goes for a spend
+    const spent = new Set<number>()
+    const spendParts = (
+      Array.isArray(spends) ? (spends as SealSpend[]) : []
+    ).map(spend => {
+      const part = encodeSealSpend(spend)
+      const index = spend.stateIndex
+      if (index >= stateParts.length || spent.has(index)) {
+        throw new Error('A spend names a transition this seal lacks.')
+      }
+      spent.add(index)
+      return part
+    })
+    const parts = [...stateParts, ...certificateParts, ...spendParts]
     let total = amountBytes.length + urlBytes.length
     for (const part of parts) total += 2 + part.length
     const payload = new Uint8Array(total)
@@ -587,6 +684,7 @@ export const decodeSealConsignment = (
     let offset = next
     const states: SealState[] = []
     const certificates: SealCertificate[] = []
+    const spends: SealSpend[] = []
     while (offset < bytes.length) {
       if (offset + 2 > bytes.length) return null
       const length = view.getUint16(offset, false)
@@ -596,24 +694,35 @@ export const decodeSealConsignment = (
       offset += length
       const certificate = decodeSealCertificate(part, amountMsat)
       if (certificate) {
+        // every certificate comes before the first spend
+        if (spends.length > 0) return null
         certificates.push(certificate)
         continue
       }
-      // every state comes before the first certificate
-      if (certificates.length > 0) return null
+      const spend = decodeSealSpend(part)
+      if (spend) {
+        spends.push(spend)
+        continue
+      }
+      // every state comes before the first certificate or spend
+      if (certificates.length > 0 || spends.length > 0) return null
       const state = decodeSealState(part)
       if (!state) return null
       states.push(state)
     }
     if (states.length === 0) return null
-    const indexes = certificates.map(c => c.stateIndex)
-    if (
-      new Set(indexes).size !== indexes.length ||
-      indexes.some(index => index >= states.length)
-    ) {
-      return null
+    for (const indexes of [
+      certificates.map(c => c.stateIndex),
+      spends.map(s => s.stateIndex)
+    ]) {
+      if (
+        new Set(indexes).size !== indexes.length ||
+        indexes.some(index => index >= states.length)
+      ) {
+        return null
+      }
     }
-    return {urlTemplate, amountMsat, states, certificates}
+    return {urlTemplate, amountMsat, states, certificates, spends}
   } catch {
     return null
   }
@@ -675,6 +784,64 @@ export const sealCertificateProblem = (
       )
     ) {
       return `State ${i}: its certificate is not this mint’s, or not for this transition.`
+    }
+  }
+  return ''
+}
+
+// '' when EVERY transition of this consignment carries the signature its
+// previous owner spent with, valid for the mint the consignment names -
+// else the first reason one doesn't. Pure and offline, like
+// sealChainProblem, which it runs first.
+//
+// What '' proves is little: each previous owner signed its note away at
+// this mint. Not where to - a spend commits to no destination, so the
+// signatures of a real history fit a look-alike of it just as well. What
+// it is FOR is the question only the mint can answer (verbs.ts's
+// seal.check puts each of these spends to it again), and what passing it
+// guarantees there is that no signature is ever sent to a mint it was not
+// made for.
+export const sealSpendProblem = (consignment: unknown): string => {
+  const parsed =
+    typeof consignment === 'string'
+      ? decodeSealConsignment(consignment)
+      : (consignment as SealConsignment | null)
+  if (!parsed || !Array.isArray(parsed.states)) {
+    return 'That doesn’t look like a valid seal consignment.'
+  }
+  const chainProblem = sealChainProblem(parsed.states)
+  if (chainProblem) return chainProblem
+  let domain: string
+  try {
+    domain = spendDomainOf(parsed.urlTemplate)
+  } catch {
+    return 'This consignment names no mint.'
+  }
+  const spends = Array.isArray(parsed.spends) ? parsed.spends : []
+  for (let i = 1; i < parsed.states.length; i++) {
+    const spend = spends.find(s => s.stateIndex === i)
+    if (!spend) {
+      return `State ${i}: the consignment carries no signature of the owner before it.`
+    }
+    const previous = parsed.states[i - 1]!
+    let valid = false
+    try {
+      valid = schnorr.verify(
+        hexToBytes(spend.signatureHex),
+        scriptPathSighash(
+          hexToBytes(planSealLock(previous).outputKeyHex),
+          domain,
+          leafFor(previous),
+          SPEND_LOCKTIME,
+          SPEND_SEQUENCE
+        ),
+        hexToBytes(previous.ownerPubkeyHex)
+      )
+    } catch {
+      // a malformed signature or key is simply not a valid one
+    }
+    if (!valid) {
+      return `State ${i}: that is not the signature its previous owner spent with at this mint.`
     }
   }
   return ''

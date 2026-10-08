@@ -48,11 +48,14 @@ import {
 } from './dlc/oracleClient'
 import {
   decodeSealConsignment,
-  redeemCurrentStateCw1,
   nextState,
   planSealLock,
   sealCertificateProblem,
   sealChainProblem,
+  sealSpendCw1,
+  sealSpendProblem,
+  signCurrentState,
+  type SealConsignment,
   type SealState
 } from './seals/seals'
 import {getTrustedMintPubkey, trustedMints} from '../trustedMints'
@@ -119,6 +122,79 @@ const matchesScope = (bearer: Bearer, scope?: string): boolean => {
     )
   }
   return false
+}
+
+// Puts every transition of a consignment to its mint again, oldest first:
+// "burn state i - 1's note into state i's", with the very signature its
+// owner spent with. LUD-25's Retries makes that a question any mint answers:
+// an exact retry of a rotate it completed gets the original success, the
+// same note under any other output gets "already spent" - so a look-alike
+// on a note minted on the side, or one half of a split, is refused.
+//
+// Nothing here can move anything. Each note is first looked up by its
+// public key alone, and only one the mint reports as spent is put to the
+// callback - a burned note stays burned, so that request can only ever be
+// answered from the mint's own record. And sealSpendProblem has checked
+// every signature offline first: a spend is bound to its mint's domain, so
+// none is ever sent to a mint it was not made for.
+//
+// `confirmed` is true when the mint confirmed every step, false when it
+// contradicted one, null when it could not be asked - `confirmProblem` says
+// which step, and why.
+const confirmSealTransitions = async (
+  parsed: SealConsignment,
+  callback: string
+): Promise<{confirmed: boolean | null; confirmProblem: string}> => {
+  const unasked = (confirmProblem: string) => ({
+    confirmed: null,
+    confirmProblem
+  })
+  const refused = (confirmProblem: string) => ({
+    confirmed: false,
+    confirmProblem
+  })
+  const spendProblem = sealSpendProblem(parsed)
+  if (spendProblem) return unasked(spendProblem)
+  const cp1s = parsed.states.map(state =>
+    encodeCp1(hexToBytes(planSealLock(state).outputKeyHex))
+  )
+  for (let i = 1; i < parsed.states.length; i++) {
+    try {
+      await fetchNoteInfoByPubkey(parsed.urlTemplate, cp1s[i - 1]!)
+      return refused(
+        `State ${i}: the note before it is still unspent at the mint - this transition was never made.`
+      )
+    } catch (err) {
+      if (err instanceof NoteUnknownError) {
+        return refused(
+          `State ${i}: the mint knows no note for the state before it.`
+        )
+      }
+      if (!(err instanceof NoteSpentError)) {
+        return unasked(
+          `State ${i}: the mint could not be asked (${(err as Error).message})`
+        )
+      }
+    }
+    const spend = parsed.spends.find(s => s.stateIndex === i)!
+    try {
+      await rotateNoteWithHash(
+        callback,
+        sealSpendCw1(parsed.states[i - 1]!, spend.signatureHex),
+        cp1s[i]!
+      )
+    } catch (err) {
+      if (err instanceof NoteSpentError || err instanceof NoteUnknownError) {
+        return refused(
+          `State ${i}: the mint does not confirm that the note before it was burned into this one.`
+        )
+      }
+      return unasked(
+        `State ${i}: the mint could not be asked (${(err as Error).message})`
+      )
+    }
+  }
+  return {confirmed: true, confirmProblem: ''}
 }
 
 export const VERBS: Record<string, VerbHandler> = {
@@ -418,11 +494,12 @@ export const VERBS: Record<string, VerbHandler> = {
     if (!urlTemplate || !currentState) {
       throw new Error('Missing this seal’s own note or current state.')
     }
-    const cw1 = redeemCurrentStateCw1(
-      currentState,
-      ownerSecretKeyHex,
-      urlTemplate
-    )
+    // the owner's signature on its own: what the next consignment carries
+    // so that its holder can put this very rotate to the mint again (see
+    // seal.check). It says nothing about where the note goes, and once the
+    // note is burned it can move nothing any more.
+    const spend = signCurrentState(currentState, ownerSecretKeyHex, urlTemplate)
+    const cw1 = sealSpendCw1(currentState, spend)
     const currentOutputKeyHex = outputKeyOfCw1(cw1)
     if (!currentOutputKeyHex) {
       throw new Error(
@@ -496,6 +573,7 @@ export const VERBS: Record<string, VerbHandler> = {
       urlTemplate,
       amountMsat: info.maxWithdrawable,
       state: next,
+      spend,
       certificate: certified ? rotation : null,
       certificateProblem: certified ? '' : rotation ? 'invalid' : 'missing'
     }
@@ -517,6 +595,11 @@ export const VERBS: Record<string, VerbHandler> = {
   // key the server named, which the addon then reports as that server's
   // word and nothing more. Never throws for a seal that is simply gone:
   // that is an answer, not an error.
+  //
+  // A live seal whose transitions are not all certified - every seal at a
+  // mint that issues no rotation certificates - has each of them put to the
+  // mint again instead (confirmSealTransitions): the same statement as a
+  // certificate, as the mint's answer right now rather than its signature.
   'seal.check': async args => {
     // echoed back so the addon only ever shows this answer under the very
     // consignment it was asked about
@@ -549,7 +632,9 @@ export const VERBS: Record<string, VerbHandler> = {
       live: false,
       reason,
       keyKnownAs: null,
-      ...certificates(pinned)
+      ...certificates(pinned),
+      confirmed: null,
+      confirmProblem: ''
     })
     const current = parsed.states[parsed.states.length - 1]!
     const outputKeyHex = planSealLock(current).outputKeyHex
@@ -585,12 +670,16 @@ export const VERBS: Record<string, VerbHandler> = {
             mint.mintPubkey.toLowerCase() === info.mintPubkey.toLowerCase() &&
             mint.server !== origin
         )?.server ?? null)
+    const certification = certificates(pinned ?? info.mintPubkey)
     return {
       ...answer,
       live: true,
       amountMsat: info.maxWithdrawable,
       keyKnownAs: keyKnownAs ? serverOf(keyKnownAs) : null,
-      ...certificates(pinned ?? info.mintPubkey)
+      ...certification,
+      ...(certification.certified
+        ? {confirmed: null, confirmProblem: ''}
+        : await confirmSealTransitions(parsed, info.callback))
     }
   },
 

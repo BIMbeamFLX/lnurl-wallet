@@ -29,9 +29,13 @@ import {
   decodeSealConsignment,
   encodeSealConsignment,
   genesisState,
+  nextState,
   planSealLock,
   sealCertificateProblem,
+  sealSpendProblem,
+  signCurrentState,
   type SealCertificate,
+  type SealSpend,
   type SealState
 } from './seals'
 
@@ -81,6 +85,8 @@ type MockMint = {
   burned: Map<string, {note: string; amountMsat: number}>
   // how many times /w/cb was asked
   rotates: number
+  // when set, what /w/cb answers every request with instead
+  refusal: string | null
   // what a rotate answers with, besides its cs1 - `attempt` counts the
   // answers for one and the same rotate, 1 for the first
   rotation: (
@@ -106,6 +112,7 @@ const mockMint = (base = BASE): MockMint => {
     live: new Map(),
     burned: new Map(),
     rotates: 0,
+    refusal: null,
     rotation: (spent, note, amountMsat) =>
       encodeCr1WithAmount(
         amountMsat,
@@ -152,6 +159,7 @@ const mockMint = (base = BASE): MockMint => {
           }
         }
         mint.rotates++
+        if (mint.refusal) return {status: 'ERROR', reason: mint.refusal}
         const spentKey = outputKeyOfCw1(url.searchParams.get('k1') ?? '')!
         const noteKey = keyOfCp1(url.searchParams.get('p1'))
         const before = mint.burned.get(spentKey)
@@ -181,6 +189,7 @@ type TransitionResult = {
   urlTemplate: string
   amountMsat: number
   state: SealState
+  spend: string
   certificate: string | null
   certificateProblem: string
 }
@@ -203,7 +212,8 @@ const transition = (
   ) as Promise<TransitionResult>
 
 // a seal issued to `owners[0]` and handed on to each next owner in turn,
-// with whatever certificates the mint really answered with
+// with whatever certificates the mint really answered with and the
+// signature each owner spent with
 const issueAndTransfer = async (
   mint: MockMint,
   owners: ReturnType<typeof keypair>[],
@@ -212,6 +222,7 @@ const issueAndTransfer = async (
   const states = [genesisState('Art #1', 'one of one', owners[0]!.pubkeyHex)]
   mint.live.set(planSealLock(states[0]!).outputKeyHex, AMOUNT_MSAT)
   const certificates: SealCertificate[] = []
+  const spends: SealSpend[] = []
   for (let i = 1; i < owners.length; i++) {
     const result = await transition(
       states[i - 1]!,
@@ -219,6 +230,7 @@ const issueAndTransfer = async (
       owners[i]!.pubkeyHex
     )
     states.push(result.state)
+    spends.push({stateIndex: i, signatureHex: result.spend})
     if (result.certificate) {
       certificates.push({stateIndex: i, cr1: result.certificate})
     }
@@ -226,10 +238,12 @@ const issueAndTransfer = async (
   return {
     states,
     certificates,
+    spends,
     consignment: encodeSealConsignment(
       {urlTemplate, amountMsat: AMOUNT_MSAT},
       states,
-      certificates
+      certificates,
+      spends
     )!
   }
 }
@@ -431,6 +445,8 @@ type CheckResult = {
   transitions: number
   certified: boolean | null
   certificateProblem: string
+  confirmed: boolean | null
+  confirmProblem: string
 }
 
 const check = (consignment: unknown) =>
@@ -454,7 +470,9 @@ describe("VERBS['seal.check']", () => {
       keyKnownAs: null,
       transitions: 2,
       certified: true,
-      certificateProblem: ''
+      certificateProblem: '',
+      confirmed: null,
+      confirmProblem: ''
     })
     // the same, at a mint this wallet has pinned
     pins.set(BASE, mint.pub)
@@ -586,7 +604,9 @@ describe("VERBS['seal.check']", () => {
       keyKnownAs: null,
       transitions: 1,
       certified: null,
-      certificateProblem: ''
+      certificateProblem: '',
+      confirmed: null,
+      confirmProblem: ''
     })
     // with a pin, the auditor of an old consignment gets a real answer
     pins.set(BASE, mint.pub)
@@ -633,5 +653,245 @@ describe("VERBS['seal.check']", () => {
     expect(decodeSealConsignment(broken)).not.toBeNull()
     await expect(check(broken)).rejects.toThrow(/chain/)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+// A mint as most are: it certifies no rotation, and answers an exact retry
+// of one it completed like every LUD-25 mint must.
+const stockMint = (base = BASE): MockMint => {
+  const mint = mockMint(base)
+  mint.rotation = () => undefined
+  return mint
+}
+
+const snapshot = (mint: MockMint) => ({
+  rotates: mint.rotates,
+  live: new Map(mint.live),
+  burned: new Map(mint.burned)
+})
+
+describe("VERBS['seal.check']: putting each transition to the mint again", () => {
+  it('seal.transition hands on the signature its owner spent with', async () => {
+    const mint = stockMint()
+    const {alice, bob, genesis} = issued(mint)
+    const result = await transition(genesis, alice.secretKeyHex, bob.pubkeyHex)
+    expect(result.spend).toMatch(/^[0-9a-f]{128}$/)
+    expect(
+      sealSpendProblem(
+        encodeSealConsignment(
+          {urlTemplate: URL_TEMPLATE, amountMsat: AMOUNT_MSAT},
+          [genesis, result.state],
+          [],
+          [{stateIndex: 1, signatureHex: result.spend}]
+        )
+      )
+    ).toBe('')
+  })
+
+  it('confirms a history at a mint that issues no certificates, and moves nothing', async () => {
+    const mint = stockMint()
+    const {consignment} = await issueAndTransfer(mint, [
+      keypair(),
+      keypair(),
+      keypair()
+    ])
+    const before = snapshot(mint)
+    expect(await check(consignment)).toMatchObject({
+      live: true,
+      transitions: 2,
+      certified: false,
+      confirmed: true,
+      confirmProblem: ''
+    })
+    // one retry per transition - and the mint is as it was
+    expect(snapshot(mint)).toEqual({...before, rotates: before.rotates + 2})
+  })
+
+  it('does not ask again about a history that is certified already', async () => {
+    const mint = mockMint()
+    const {consignment} = await issueAndTransfer(mint, [keypair(), keypair()])
+    const before = snapshot(mint)
+    expect(await check(consignment)).toMatchObject({
+      certified: true,
+      confirmed: null,
+      confirmProblem: ''
+    })
+    expect(snapshot(mint)).toEqual(before)
+  })
+
+  it('is contradicted for a look-alike on a note of its own', async () => {
+    // someone who knows the history - spend signature included, it is in
+    // every consignment - mints a note onto a made-up next state
+    const mint = stockMint()
+    const real = await issueAndTransfer(mint, [keypair(), keypair()])
+    const forgedState: SealState = {
+      ...real.states[1]!,
+      ownerPubkeyHex: keypair().pubkeyHex
+    }
+    mint.live.set(planSealLock(forgedState).outputKeyHex, AMOUNT_MSAT)
+    const forged = encodeSealConsignment(
+      {urlTemplate: URL_TEMPLATE, amountMsat: AMOUNT_MSAT},
+      [real.states[0]!, forgedState],
+      [],
+      real.spends
+    )!
+    // offline there is nothing to tell them apart,
+    expect(sealSpendProblem(forged)).toBe('')
+    const before = snapshot(mint)
+    const result = await check(forged)
+    expect(result.live).toBe(true)
+    expect(result.confirmed).toBe(false)
+    expect(result.confirmProblem).toMatch(
+      /^State 1: the mint does not confirm that the note before it was burned into this one/
+    )
+    expect(snapshot(mint)).toEqual({...before, rotates: before.rotates + 1})
+    // the real one, side by side
+    expect((await check(real.consignment)).confirmed).toBe(true)
+  })
+
+  it('is contradicted for either half of a split', async () => {
+    // the owner did spend the note - into two, each locked to a next state
+    const mint = stockMint()
+    const {alice, genesis} = issued(mint)
+    const genesisKey = planSealLock(genesis).outputKeyHex
+    const halves = [keypair(), keypair()].map(owner =>
+      nextState(genesis, owner.pubkeyHex)
+    )
+    mint.live.delete(genesisKey)
+    mint.burned.set(genesisKey, {note: 'two notes', amountMsat: AMOUNT_MSAT})
+    const spend = {
+      stateIndex: 1,
+      signatureHex: signCurrentState(genesis, alice.secretKeyHex, URL_TEMPLATE)
+    }
+    for (const half of halves) {
+      mint.live.set(planSealLock(half).outputKeyHex, AMOUNT_MSAT / 2)
+      const result = await check(
+        encodeSealConsignment(
+          {urlTemplate: URL_TEMPLATE, amountMsat: AMOUNT_MSAT / 2},
+          [genesis, half],
+          [],
+          [spend]
+        )
+      )
+      expect(result.live).toBe(true)
+      expect(result.confirmed).toBe(false)
+    }
+  })
+
+  it('never puts a spend to the callback while its note is unspent', async () => {
+    // The owner signed, and the rotate was never sent - or a seller hands
+    // out a history one step ahead of the mint. Asked at the callback, that
+    // signature WOULD move the seal: checking must not be what does it.
+    const mint = stockMint()
+    const {alice, bob, genesis} = issued(mint)
+    const next = nextState(genesis, bob.pubkeyHex)
+    mint.live.set(planSealLock(next).outputKeyHex, AMOUNT_MSAT)
+    const consignment = encodeSealConsignment(
+      {urlTemplate: URL_TEMPLATE, amountMsat: AMOUNT_MSAT},
+      [genesis, next],
+      [],
+      [
+        {
+          stateIndex: 1,
+          signatureHex: signCurrentState(
+            genesis,
+            alice.secretKeyHex,
+            URL_TEMPLATE
+          )
+        }
+      ]
+    )!
+    const before = snapshot(mint)
+    const result = await check(consignment)
+    expect(result.confirmed).toBe(false)
+    expect(result.confirmProblem).toMatch(
+      /^State 1: the note before it is still unspent at the mint - this transition was never made/
+    )
+    expect(snapshot(mint)).toEqual(before)
+    expect(mint.live.has(planSealLock(genesis).outputKeyHex)).toBe(true)
+  })
+
+  it('sends no signature to a mint it was not made for', async () => {
+    const real = stockMint()
+    const {states, spends} = await issueAndTransfer(real, [
+      keypair(),
+      keypair()
+    ])
+    vi.unstubAllGlobals()
+    // another server, holding the very same notes in the very same state
+    const OTHER = 'https://other-mint.test'
+    const other = stockMint(OTHER)
+    other.live.set(planSealLock(states[1]!).outputKeyHex, AMOUNT_MSAT)
+    other.burned.set(planSealLock(states[0]!).outputKeyHex, {
+      note: planSealLock(states[1]!).outputKeyHex,
+      amountMsat: AMOUNT_MSAT
+    })
+    const repointed = encodeSealConsignment(
+      {urlTemplate: `${OTHER}/w`, amountMsat: AMOUNT_MSAT},
+      states,
+      [],
+      spends
+    )!
+    const result = await check(repointed)
+    expect(result.host).toBe('other-mint.test')
+    expect(result.live).toBe(true)
+    expect(result.confirmed).toBeNull()
+    expect(result.confirmProblem).toMatch(
+      /^State 1: that is not the signature its previous owner spent with at this mint/
+    )
+    expect(other.rotates).toBe(0)
+  })
+
+  it('says so when a consignment carries no signatures to ask with', async () => {
+    const mint = stockMint()
+    const {states} = await issueAndTransfer(mint, [keypair(), keypair()])
+    const before = snapshot(mint)
+    const result = await check(
+      encodeSealConsignment(
+        {urlTemplate: URL_TEMPLATE, amountMsat: AMOUNT_MSAT},
+        states
+      )
+    )
+    expect(result.live).toBe(true)
+    expect(result.certified).toBe(false)
+    expect(result.confirmed).toBeNull()
+    expect(result.confirmProblem).toMatch(
+      /^State 1: the consignment carries no signature/
+    )
+    expect(snapshot(mint)).toEqual(before)
+  })
+
+  it('tells a mint that could not be asked from one that said no', async () => {
+    const mint = stockMint()
+    const {consignment} = await issueAndTransfer(mint, [keypair(), keypair()])
+    mint.refusal = 'rate limited'
+    const result = await check(consignment)
+    expect(result.live).toBe(true)
+    expect(result.confirmed).toBeNull()
+    expect(result.confirmProblem).toMatch(
+      /^State 1: the mint could not be asked \(.*rate limited/
+    )
+  })
+
+  it('is not asked about a seal whose note is gone', async () => {
+    const mint = stockMint()
+    const {states, spends} = await issueAndTransfer(mint, [
+      keypair(),
+      keypair(),
+      keypair()
+    ])
+    const before = snapshot(mint)
+    const stale = encodeSealConsignment(
+      {urlTemplate: URL_TEMPLATE, amountMsat: AMOUNT_MSAT},
+      states.slice(0, 2),
+      [],
+      spends.slice(0, 1)
+    )
+    expect(await check(stale)).toMatchObject({
+      live: false,
+      confirmed: null,
+      confirmProblem: ''
+    })
+    expect(snapshot(mint)).toEqual(before)
   })
 })

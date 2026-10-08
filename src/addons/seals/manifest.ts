@@ -648,10 +648,19 @@ const nextConsignment = (
         {stateIndex: result.state.stateIndex, cr1: result.certificate}
       ]
     : carried
+  // and every owner's spend signature, this transition's own included: what
+  // lets the next holder put each step to the mint again (seal.check)
+  const spends = result.spend
+    ? [
+        ...parsed.spends,
+        {stateIndex: result.state.stateIndex, signatureHex: result.spend}
+      ]
+    : parsed.spends
   return encodeSealConsignment(
     {urlTemplate: result.urlTemplate, amountMsat: result.amountMsat},
     [...parsed.states, result.state],
-    certificates
+    certificates,
+    spends
   )
 }
 
@@ -659,6 +668,8 @@ type TransitionResult = {
   urlTemplate: string
   amountMsat: number
   state: SealState
+  // the signature this transition's previous owner spent with
+  spend?: string
   certificate: string | null
   // '' when certified; 'missing' when the mint sent no certificate (twice),
   // 'invalid' when it sent one that is not its own for this step
@@ -693,7 +704,7 @@ const transitionCertificateLine = (transitionResult: unknown): string => {
   }
   return result.certificateProblem === 'invalid'
     ? 'The mint answered with a certificate that is not its own for this step - its signing key may differ from the one this wallet has pinned for it. The transition landed, but this step goes on uncertified.'
-    : 'The mint did not certify this transition (not every mint issues rotation certificates). The history below still chains together, but nobody can check that this step was the only one.'
+    : 'The mint did not certify this transition (not every mint issues rotation certificates). The consignment below carries your signature for this step instead: with it the next holder can ask the mint whether this note was burned into exactly that one ("Check at the mint"). That works online only.'
 }
 
 // the new state itself, for the one case nextConsignment cannot build a
@@ -726,6 +737,11 @@ type CheckResult = {
   // null when there was no key to check the certificates against
   certified: boolean | null
   certificateProblem: string
+  // what the mint said when every transition was put to it again: true when
+  // it confirmed each, false when it contradicted one, null when it was not
+  // asked (certified already, or the note is gone) or could not be
+  confirmed?: boolean | null
+  confirmProblem?: string
 }
 
 const checkReport = (
@@ -764,16 +780,29 @@ const checkReport = (
     lines.push(
       `Its ${result.transitions} transition(s) could not be checked: this wallet has no key pinned for ${host}.`
     )
-  } else if (!result.certified) {
-    lines.push(`✗ Not fully certified - ${result.certificateProblem}`)
-  } else if (pinned) {
+  } else if (result.certified) {
     lines.push(
-      `✓ Every one of its ${result.transitions} transition(s) is certified by the key this wallet has pinned for ${host}: each note is the only one its predecessor was burned into.`
+      pinned
+        ? `✓ Every one of its ${result.transitions} transition(s) is certified by the key this wallet has pinned for ${host}: each note is the only one its predecessor was burned into.`
+        : `Every one of its ${result.transitions} transition(s) is certified by the key ${host} names as its own.`
     )
+  } else if (result.confirmed) {
+    // asked again, step by step - see verbs.ts's confirmSealTransitions
+    lines.push(
+      pinned
+        ? `✓ ${host} confirmed every one of its ${result.transitions} transition(s) just now: each note is the only one its predecessor was burned into.`
+        : `${host} says every one of its ${result.transitions} transition(s) happened as this history states.`,
+      'That is its answer right now, not a signature: this history has no certificate for every step, so it cannot be checked again offline.'
+    )
+  } else if (result.confirmed === false) {
+    lines.push(`✗ ${result.confirmProblem}`)
   } else {
-    lines.push(
-      `Every one of its ${result.transitions} transition(s) is certified by the key ${host} names as its own.`
-    )
+    lines.push(`✗ Not fully certified - ${result.certificateProblem}`)
+    if (result.confirmProblem) {
+      lines.push(
+        `Its transitions could not be put to the mint again either - ${result.confirmProblem}`
+      )
+    }
   }
   if (result.mintPubkey) lines.push(`Key: ${result.mintPubkey}`)
   if (result.keyKnownAs) {
@@ -1421,7 +1450,7 @@ const docsUi: UiNode[] = [
       'Anyone - the owner, a future buyer, an auditor - can validate that whole history themselves, offline, for free: does it chain together correctly, does the asset’s own identity ever change (it must not).',
       'To transition, the current owner reveals their own current state and signs with their own key, in the same step rotating the note directly into a fresh leaf committing to the next owner. A new consignment goes out carrying the extended history.',
       'A seal can be about a picture: pick a JPG or PNG when you issue it and the seal’s asset id is that file’s sha256. The consignment can then travel inside the file itself, in a place every viewer skips - the picture shows exactly as before, and "Manage" reads the seal back out of it and checks the file against the asset id.',
-      'The mint answers that rotate with a rotation certificate: its signature that this note was burned into exactly that one. The consignment carries one per transition, so the next holder can check offline that no step is a look-alike note minted on the side, or one half of a split.'
+      'The consignment carries, for every transition, the signature its previous owner spent with. With it the next holder can put the same rotate to the mint again ("Check at the mint"): a mint answers an exact repeat of a rotate it completed with the same success, and anything else with "already spent". So a look-alike note minted on the side, or one half of a split, is refused. A mint that issues rotation certificates also signs that statement, and then it can be checked offline.'
     ],
     children: [{type: 'Text', value: {var: 'item'}}]
   },
@@ -1438,7 +1467,7 @@ const docsUi: UiNode[] = [
   {
     type: 'Text',
     value:
-      'Honest limits: transfers name a specific next owner, unless you make a bearer picture - then it is race-to-claim by design. An unredeemed transition is a promise, not a guarantee, until it actually lands at the mint - the underlying note can still only be redeemed once. A certified history is as good as the mint that signed it: the mint could sign a second history, and only the mint knows whether the last note is still unspent - "Check at the mint" asks it. A seal from a mint that issues no rotation certificates stays valid, but its history is only self-consistent, not certified.'
+      'Honest limits: transfers name a specific next owner, unless you make a bearer picture - then it is race-to-claim by design. An unredeemed transition is a promise, not a guarantee, until it actually lands at the mint - the underlying note can still only be redeemed once. A checked history is as good as the mint that vouched for it: the mint could vouch for a second history, and only the mint knows whether the last note is still unspent - "Check at the mint" asks it. A seal from a mint that issues no rotation certificates can only be checked online, while that mint is there to ask.'
   },
   {
     type: 'Text',
@@ -1474,7 +1503,7 @@ const sealsManifest: AddonManifest = {
     {
       verb: 'seal.check',
       reason:
-        'Ask a seal’s own mint whether its current note is still unspent, and check the mint’s certificate for every transition'
+        'Ask a seal’s own mint whether its current note is still unspent, and check every transition: by the mint’s certificate, or by putting the same rotate to it again'
     },
     {verb: 'clipboard.copy', reason: 'Copy a consignment'},
     {
