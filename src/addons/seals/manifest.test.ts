@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest'
 import {schnorr} from '@noble/curves/secp256k1.js'
 import {sha256} from '@noble/hashes/sha2.js'
-import {bytesToHex} from '@noble/hashes/utils.js'
+import {bytesToHex, hexToBytes} from '@noble/hashes/utils.js'
 import {base64} from '@scure/base'
 import {GLOBAL_HELPERS} from '../globalHelpers'
 import {imageDataUrl} from '../imageData'
@@ -370,5 +370,47 @@ describe('managing a seal out of its picture', () => {
     expect(
       helper('canDownloadTransitioned')(sealedPicture, unrelated, result, null)
     ).toBe(false)
+  })
+})
+
+describe('a key made on the page for a seal’s owner', () => {
+  it('comes with the address the owner fields take', async () => {
+    const key = helper('newOwnerKey')()
+    expect(key.secretKeyHex).toMatch(/^[0-9a-f]{64}$/)
+    expect(key.pubkeyHex).toBe(
+      bytesToHex(schnorr.getPublicKey(hexToBytes(key.secretKeyHex)))
+    )
+    // what "Resolve owner pubkey" makes of that address: this very key
+    const resolved = await VERBS['note.resolveAddressPubkey']!(
+      {address: key.address},
+      {} as never
+    )
+    expect(resolved).toBe(`02${key.pubkeyHex}`)
+  })
+
+  it('is a new one every time', () => {
+    expect(helper('newOwnerKey')().secretKeyHex).not.toBe(
+      helper('newOwnerKey')().secretKeyHex
+    )
+  })
+
+  it('is shown again after issuing only when the seal went to it', () => {
+    const key = helper('newOwnerKey')()
+    const plan = helper('prepareGenesis')('Art #1', '', key.pubkeyHex)
+    expect(helper('issuedToKey')(plan, key)).toBe(true)
+    // made here, but the seal was issued to someone else's address
+    expect(helper('issuedToKey')(plan, helper('newOwnerKey')())).toBe(false)
+    expect(helper('issuedToKey')(plan, null)).toBe(false)
+    expect(helper('issuedToKey')(null, key)).toBe(false)
+  })
+
+  it('is shown again after a transition only when the seal moved to it', () => {
+    const [issuer, key] = [keypair(), helper('newOwnerKey')()]
+    const genesis = helper('prepareGenesis')('Art #1', '', issuer.pubkeyHex)
+    const moved = {state: nextState(genesis.state, key.pubkeyHex)}
+    expect(helper('movedToKey')(moved, key)).toBe(true)
+    expect(helper('movedToKey')(moved, helper('newOwnerKey')())).toBe(false)
+    expect(helper('movedToKey')(moved, null)).toBe(false)
+    expect(helper('movedToKey')(null, key)).toBe(false)
   })
 })

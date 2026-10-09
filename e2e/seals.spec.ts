@@ -445,6 +445,90 @@ test('a picture seal: issued, read out of its file, handed on as a bearer pictur
   ).toBeVisible()
 })
 
+test('a seal issued to a key made on the page, and taken over with another', async ({
+  page
+}) => {
+  await setUpWallet(page)
+  // this is an ordinary build, not a demo one (src/demo.ts): no notice, and
+  // Seals is off until openSeals below turns it on
+  await expect(page.locator('.demo-notice')).toHaveCount(0)
+  await expect(page.locator('nav a[href$="/addons/seals"]')).toHaveCount(0)
+  await mockMint(page)
+  await receiveSourceNote(page)
+  await openSeals(page)
+  const pubkeyOf = (secretKeyHex: string): string =>
+    bytesToHex(schnorr.getPublicKey(hexToBytes(secretKeyHex)))
+  const madeKey = page.getByText(/^Secret key of your new key: [0-9a-f]{64}$/)
+
+  // ---- issue it to oneself: no address to bring, the page makes the key
+  await page.getByLabel('Asset name').fill('Test Card #17')
+  await page
+    .getByLabel(/^Picture \(optional\)/)
+    .setInputFiles(fileOf('card.png', PICTURE))
+  const makeOwnerKey = page.getByRole('button', {
+    name: 'Make a key to issue it to myself'
+  })
+  await makeOwnerKey.click()
+  const ownerSecret = (await madeKey.innerText()).slice(-64)
+  // one key per page: a second would replace the one a seal is about to go to
+  await expect(makeOwnerKey).toHaveCount(0)
+  await page
+    .getByRole('button', {name: 'Use this key as the first owner'})
+    .click()
+  await page.getByLabel(/^Note to lock/).selectOption({index: 1})
+  await page.getByRole('button', {name: 'Resolve owner pubkey'}).click()
+  await expect(
+    page.getByText(`Owner pubkey: ${pubkeyOf(ownerSecret)}`)
+  ).toBeVisible()
+  await page.getByRole('button', {name: 'Prepare'}).click()
+  await page.getByRole('button', {name: 'Issue', exact: true}).click()
+  await expect(page.getByText('✓ Seal issued')).toBeVisible()
+  // the form the key was made in is gone - the key must not go with it
+  await expect(
+    page.getByText('This seal belongs to the key you made on this page.')
+  ).toBeVisible()
+  await expect(
+    page.getByText(`Secret key of your new key: ${ownerSecret}`)
+  ).toBeVisible()
+  const issued = await downloaded(page, 'Download picture with consignment')
+
+  // ---- take it over on a fresh page: the saved secret, and a new key
+  await page.reload()
+  await expect(page.getByText('Manage or verify a seal')).toBeVisible()
+  await manage(page, issued.bytes)
+  await page.getByLabel('Your secret key (32-byte hex)').fill(ownerSecret)
+  await page.getByRole('button', {name: 'Make a key to take it myself'}).click()
+  const nextSecret = (await madeKey.innerText()).slice(-64)
+  expect(nextSecret).not.toBe(ownerSecret)
+  await page
+    .getByRole('button', {name: 'Use this key as the next owner'})
+    .click()
+  await page.getByRole('button', {name: 'Resolve next owner pubkey'}).click()
+  await expect(
+    page.getByText(`Next owner: ${pubkeyOf(nextSecret)}`)
+  ).toBeVisible()
+  await page.getByRole('button', {name: 'Transition', exact: true}).click()
+  await expect(page.getByText('✓ Transitioned')).toBeVisible()
+  await expect(
+    page.getByText('The seal now belongs to the key you made on this page.')
+  ).toBeVisible()
+  await expect(
+    page.getByText(`Secret key of your new key: ${nextSecret}`)
+  ).toBeVisible()
+
+  const moved = await downloaded(
+    page,
+    'Download picture with the new consignment'
+  )
+  const history = decodeSealConsignment(
+    sealEnvelopeOf(moved.bytes)!.consignment
+  )!
+  expect(history.states.map(state => state.ownerPubkeyHex)).toEqual([
+    pubkeyOf(ownerSecret),
+    pubkeyOf(nextSecret)
+  ])
+})
+
 test('a picture that is not the seal’s own is told apart from the one that is', async ({
   page
 }) => {

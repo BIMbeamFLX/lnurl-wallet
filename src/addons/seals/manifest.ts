@@ -3,6 +3,7 @@ import {schnorr} from '@noble/curves/secp256k1.js'
 import {bytesToHex, hexToBytes} from '@noble/hashes/utils.js'
 import {
   decodeCr1WithAmount,
+  encodeCp1,
   encodeCr1WithAmount
 } from '../../lib/recoverableNotes'
 import {serverOf} from '../../lib/urls'
@@ -303,6 +304,93 @@ const issuedConsignmentText = (
     .join('\n')
 }
 
+// ---- a key of one's own ----
+
+type OwnerKey = {secretKeyHex: string; pubkeyHex: string; address: string}
+
+// A seal belongs to a key, and an addon never touches this wallet's seed
+// (see this file's own top comment). So whoever issues a seal to
+// themselves, or takes one over, needs a key of their own - and its cp1,
+// which is what the owner fields take. Made and held in this page's state
+// only, like a bearer picture's one-time key: keeping the secret is the
+// holder's job.
+const newOwnerKey = (): OwnerKey => {
+  const key = generateKeypair()
+  return {...key, address: encodeCp1(hexToBytes(key.pubkeyHex))}
+}
+
+// whether the seal just issued belongs to the key made on this page - only
+// then is that key's secret shown again once the form it was made in is gone
+const issuedToKey = (genesisPlan: unknown, ownerKey: unknown): boolean => {
+  const plan = genesisPlan as GenesisPlan | null
+  const key = ownerKey as OwnerKey | null
+  return !!plan && !!key && plan.state.ownerPubkeyHex === key.pubkeyHex
+}
+
+// a key made on this page, shown so that it gets saved: nothing else can
+// move a seal that belongs to it
+const secretKeyUi = (key: string): UiNode[] => [
+  {
+    type: 'Text',
+    value: {
+      cat: ['Secret key of your new key: ', {var: `${key}.secretKeyHex`}]
+    },
+    style: 'response-block'
+  },
+  {
+    type: 'Text',
+    value:
+      'Save this secret key now. It is the only thing that can move the seal, and this page forgets it on reload.'
+  },
+  {
+    type: 'Button',
+    label: 'Copy secret key',
+    onClick: {
+      verb: 'clipboard.copy',
+      args: {text: {var: `${key}.secretKeyHex`}}
+    }
+  }
+]
+
+// makes a key on the page and puts its address into an owner field: `key`
+// is where the key is held, `target` the field its cp1 goes into. One key
+// per page, like the one-time key: a second would replace the only key to
+// a seal about to move to the first.
+const ownKeyUi = (
+  key: string,
+  target: string,
+  text: {intro: string; make: string; use: string}
+): UiNode[] => [
+  {type: 'Text', value: text.intro},
+  {
+    type: 'Show',
+    when: {helper: 'not', args: [{var: key}]},
+    children: [
+      {
+        type: 'Button',
+        label: text.make,
+        onClick: {
+          action: 'set',
+          path: key,
+          value: {helper: 'newOwnerKey', args: []}
+        }
+      }
+    ]
+  },
+  {
+    type: 'Show',
+    when: {var: key},
+    children: [
+      ...secretKeyUi(key),
+      {
+        type: 'Button',
+        label: text.use,
+        onClick: {action: 'set', path: target, value: {var: `${key}.address`}}
+      }
+    ]
+  }
+]
+
 const issueUi: UiNode[] = [
   {type: 'Text', value: 'Issue a new seal', style: 'subheading'},
   {
@@ -329,6 +417,12 @@ const issueUi: UiNode[] = [
         ]
       },
       {type: 'Text', value: 'First owner'},
+      ...ownKeyUi('ownerKey', 'firstOwnerAddress', {
+        intro:
+          'Issuing it to yourself? A seal belongs to a key, and this wallet never uses its seed for one. Make a key here, or enter an address below.',
+        make: 'Make a key to issue it to myself',
+        use: 'Use this key as the first owner'
+      }),
       {
         type: 'Input',
         bind: 'firstOwnerAddress',
@@ -458,6 +552,20 @@ const issueUi: UiNode[] = [
     when: {var: 'issuedNote'},
     children: [
       {type: 'Text', value: '✓ Seal issued', style: 'subheading'},
+      {
+        type: 'Show',
+        when: {
+          helper: 'issuedToKey',
+          args: [{var: 'genesisPlan'}, {var: 'ownerKey'}]
+        },
+        children: [
+          {
+            type: 'Text',
+            value: 'This seal belongs to the key you made on this page.'
+          },
+          ...secretKeyUi('ownerKey')
+        ]
+      },
       {
         type: 'Text',
         value:
@@ -1159,6 +1267,12 @@ const manageUi: UiNode[] = [
               args: [{var: 'consignmentInput'}, {var: 'ownerSecretKeyHex'}]
             },
             children: [
+              ...ownKeyUi('nextOwnerKey', 'nextOwnerAddress', {
+                intro:
+                  'Taking it yourself? Make a key of your own for it here, or enter the next owner’s address below.',
+                make: 'Make a key to take it myself',
+                use: 'Use this key as the next owner'
+              }),
               {
                 type: 'Input',
                 bind: 'nextOwnerAddress',
@@ -1322,6 +1436,20 @@ const manageUi: UiNode[] = [
             type: 'Text',
             value:
               'The seal has moved: its old note is spent. This page is done with it - what follows is the only record of where it went.'
+          },
+          {
+            type: 'Show',
+            when: {
+              helper: 'movedToKey',
+              args: [{var: 'transitionResult'}, {var: 'nextOwnerKey'}]
+            },
+            children: [
+              {
+                type: 'Text',
+                value: 'The seal now belongs to the key you made on this page.'
+              },
+              ...secretKeyUi('nextOwnerKey')
+            ]
           },
           {
             type: 'Show',
@@ -1505,7 +1633,10 @@ const sealsManifest: AddonManifest = {
       reason:
         'Ask a seal’s own mint whether its current note is still unspent, and check every transition: by the mint’s certificate, or by putting the same rotate to it again'
     },
-    {verb: 'clipboard.copy', reason: 'Copy a consignment'},
+    {
+      verb: 'clipboard.copy',
+      reason: 'Copy a consignment, or the secret of a key made on this page'
+    },
     {
       verb: 'file.download',
       reason: 'Save a consignment file, or a picture that carries one'
@@ -1516,6 +1647,7 @@ const sealsManifest: AddonManifest = {
     name: '',
     description: '',
     picture: null,
+    ownerKey: null,
     firstOwnerAddress: '',
     firstOwnerPubkeyHex: '',
     selectedNote: null,
@@ -1528,6 +1660,7 @@ const sealsManifest: AddonManifest = {
     myAddress: '',
     myResolvedPubkeyHex: '',
     ownerSecretKeyHex: '',
+    nextOwnerKey: null,
     nextOwnerAddress: '',
     nextOwnerPubkeyHex: '',
     claimKey: null,
@@ -1586,6 +1719,11 @@ const sealsHelpers: Record<string, AddonHelper> = {
   // a fresh, random keypair for a bearer picture's hand-over - made and
   // held in this page's own state only, never from this wallet's seed
   newClaimKey: generateKeypair as AddonHelper,
+  // a key of the holder's own, with the address the owner fields take
+  newOwnerKey: newOwnerKey as AddonHelper,
+  issuedToKey: issuedToKey as AddonHelper,
+  // the same question as for the one-time key, asked of a key made here
+  movedToKey: movedToClaimKey as AddonHelper,
   transitionedPicture: transitionedPicture as AddonHelper,
   canDownloadTransitioned: canDownloadTransitioned as AddonHelper,
   transitionedPictureLine: transitionedPictureLine as AddonHelper
