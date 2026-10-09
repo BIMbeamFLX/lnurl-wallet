@@ -7,7 +7,9 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
+    "dev:demo": "vite --mode demo",
     "build": "vite build",
+    "build:demo": "vite build --mode demo",
     "tsc": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",

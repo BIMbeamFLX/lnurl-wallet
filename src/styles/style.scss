@@ -414,6 +414,12 @@ a:where(.icon-btn, .link-btn) {
   }
 }
 
+// a demo build's own line about itself (DemoNotice.tsx), above every page
+.demo-notice {
+  margin: 0 0 16px 0;
+  text-align: center;
+}
+
 label {
   margin-top: 10px;
   display: block;

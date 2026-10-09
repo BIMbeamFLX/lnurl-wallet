@@ -1,6 +1,8 @@
 import {AiFillGithub} from 'solid-icons/ai'
 import {IoLockClosedSharp, IoGlobeSharp} from 'solid-icons/io'
 import {A} from '@solidjs/router'
+import {Show} from 'solid-js'
+import {SEAL_DEMO} from '../demo'
 
 const Footer = () => {
   return (
@@ -10,6 +12,18 @@ const Footer = () => {
       read fine together, unlike the longer privacy note below them */}
       <div class="footer-item footer-row">
         <span class="footer-row-item">LNURLwallet {__APP_VERSION__}</span>
+        {/* a demo build (demo.ts) is a fork's, and says where its source is -
+        the links after it stay the original's */}
+        <Show when={SEAL_DEMO}>
+          <a
+            class="footer-row-item"
+            href="https://github.com/BIMbeamFLX/lnurl-wallet/tree/nft"
+            target="_blank"
+            rel="noreferrer"
+          >
+            seal-NFT demo build
+          </a>
+        </Show>
         <a
           class="footer-row-item"
           href="https://lnurlcash.com"

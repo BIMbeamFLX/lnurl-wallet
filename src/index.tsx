@@ -15,6 +15,7 @@ import './styles/background.scss'
 
 import Nav from './components/Nav'
 import Footer from './components/Footer'
+import DemoNotice from './components/DemoNotice'
 import AddressAutoScanner from './components/AddressAutoScanner'
 import Hero from './pages/Hero'
 import Wallet from './pages/Wallet'
@@ -54,6 +55,7 @@ const App = (props: any) => {
         itself) - see the component's own top comment for what it does and
         does not cover */}
         <AddressAutoScanner />
+        <DemoNotice />
         {/* a render-time throw (e.g. one malformed stored record) must
         never take down the whole app shell - show a recoverable error
         instead of a permanently blank page */}
