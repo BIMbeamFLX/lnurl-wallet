@@ -17,7 +17,7 @@ const Footer = () => {
         <Show when={SEAL_DEMO}>
           <a
             class="footer-row-item"
-            href="https://github.com/BIMbeamFLX/lnurl-wallet/tree/nft"
+            href="https://github.com/BIMbeamFLX/lnurl-wallet/tree/demo"
             target="_blank"
             rel="noreferrer"
           >
