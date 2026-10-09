@@ -10,6 +10,7 @@
     "dev:demo": "vite --mode demo",
     "build": "vite build",
     "build:demo": "vite build --mode demo",
+    "preview": "vite preview",
     "tsc": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
